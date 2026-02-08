@@ -21,23 +21,56 @@ def _piece_at(board, position):
     return piece
 
 
-def test_starting_knight_moves():
-    board = Board()
-
-    assert set(_piece_at(board, (1, 0)).get_legal_moves(board)) == {(0, 2), (2, 2)}
-    assert set(_piece_at(board, (6, 0)).get_legal_moves(board)) == {(5, 2), (7, 2)}
-    assert set(_piece_at(board, (1, 7)).get_legal_moves(board)) == {(0, 5), (2, 5)}
-    assert set(_piece_at(board, (6, 7)).get_legal_moves(board)) == {(5, 5), (7, 5)}
+def _move_counts_by_position(board):
+    return {piece.position: len(piece.get_legal_moves(board)) for piece in board.pieces}
 
 
-def test_starting_bishop_moves_blocked():
-    board = Board()
+def _assert_position_move_counts(case_name, board, expected_move_counts):
+    actual_move_counts = _move_counts_by_position(board)
+    assert set(actual_move_counts) == set(expected_move_counts), (
+        f"{case_name}: expected positions {sorted(expected_move_counts)} "
+        f"but got {sorted(actual_move_counts)}"
+    )
 
-    assert _piece_at(board, (2, 0)).get_legal_moves(board) == []
-    assert _piece_at(board, (5, 0)).get_legal_moves(board) == []
-    assert _piece_at(board, (2, 7)).get_legal_moves(board) == []
-    assert _piece_at(board, (5, 7)).get_legal_moves(board) == []
+    for position, expected_count in expected_move_counts.items():
+        actual_count = actual_move_counts[position]
+        assert actual_count == expected_count, (
+            f"{case_name}: piece at {position} expected {expected_count} moves, "
+            f"got {actual_count}"
+        )
 
+
+def _starting_position_expected_move_counts():
+    expected = {}
+
+    for col in range(8):
+        expected[(col, 1)] = 2
+        expected[(col, 6)] = 2
+
+    for col in (1, 6):
+        expected[(col, 0)] = 2
+        expected[(col, 7)] = 2
+
+    for col in (0, 2, 3, 4, 5, 7):
+        expected[(col, 0)] = 0
+        expected[(col, 7)] = 0
+
+    return expected
+
+
+POSITION_MOVE_COUNT_CASES = [
+    {
+        "name": "starting_position",
+        "setup": Board,
+        "expected_move_counts": _starting_position_expected_move_counts(),
+    }
+]
+
+
+def test_position_move_counts():
+    for case in POSITION_MOVE_COUNT_CASES:
+        board = case["setup"]()
+        _assert_position_move_counts(case["name"], board, case["expected_move_counts"])
 
 def test_rook_path_obstruction_and_capture():
     board = _empty_board()
@@ -50,17 +83,16 @@ def test_rook_path_obstruction_and_capture():
 
 def test_pawn_forward_and_diagonal_captures():
     board = _empty_board()
-    pawn = _place(board, Pawn("white", (4, 6)))
-    _place(board, Pawn("black", (3, 5)))
-    _place(board, Pawn("black", (5, 5)))
+    pawn = _place(board, Pawn("white", (4, 1)))
+    _place(board, Pawn("black", (3, 2)))
+    _place(board, Pawn("black", (5, 2)))
 
-    assert set(pawn.get_legal_moves(board)) == {(4, 5), (3, 5), (5, 5)}
+    assert set(pawn.get_legal_moves(board)) == {(4, 2), (4, 3), (3, 2), (5, 2)}
 
 
 def run_all_tests():
     tests = [
-        test_starting_knight_moves,
-        test_starting_bishop_moves_blocked,
+        test_position_move_counts,
         test_rook_path_obstruction_and_capture,
         test_pawn_forward_and_diagonal_captures,
     ]

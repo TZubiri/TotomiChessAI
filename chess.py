@@ -166,7 +166,7 @@ class Pawn(Piece):
         col, row = self.position
         moves = []
         
-        direction = -1 if self.color == 'white' else 1
+        direction = 1 if self.color == 'white' else -1
         
         # One step forward
         new_row = row + direction
