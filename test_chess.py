@@ -2,6 +2,7 @@ import tempfile
 
 from chess import (
     Board,
+    King,
     Pawn,
     Rook,
     apply_coordinate_move,
@@ -182,6 +183,66 @@ def test_last_game_scenario_attempted_moves():
     assert normalized_move == "e4f5"
 
 
+def test_en_passant_capture_is_available_immediately():
+    board, current_turn = _replay_moves(["e2e4", "a7a6", "e4e5", "f7f5"])
+    assert current_turn == "white"
+
+    piece, to_position, normalized_move = apply_coordinate_move(board, "white", "e5f6")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (5, 5)
+    assert normalized_move == "e5f6"
+    assert board.get_piece_at((5, 5)) == piece
+    assert board.get_piece_at((5, 4)) is None
+
+
+def test_en_passant_expires_after_one_turn():
+    board, current_turn = _replay_moves(["e2e4", "a7a6", "e4e5", "f7f5", "a2a3", "a6a5"])
+    assert current_turn == "white"
+
+    try:
+        apply_coordinate_move(board, "white", "e5f6")
+        assert False, "Expected en passant window to expire"
+    except ValueError as error:
+        assert str(error) == "Illegal move for that piece"
+
+
+def test_castling_kingside_and_queenside():
+    kingside_board = _empty_board()
+    _place(kingside_board, King("white", (4, 0)))
+    _place(kingside_board, Rook("white", (7, 0)))
+
+    piece, to_position, normalized_move = apply_coordinate_move(kingside_board, "white", "e1g1")
+    assert piece.__class__.__name__ == "King"
+    assert to_position == (6, 0)
+    assert normalized_move == "e1g1"
+    rook = kingside_board.get_piece_at((5, 0))
+    assert rook is not None and rook.__class__.__name__ == "Rook"
+
+    queenside_board = _empty_board()
+    _place(queenside_board, King("white", (4, 0)))
+    _place(queenside_board, Rook("white", (0, 0)))
+
+    piece, to_position, normalized_move = apply_coordinate_move(queenside_board, "white", "e1c1")
+    assert piece.__class__.__name__ == "King"
+    assert to_position == (2, 0)
+    assert normalized_move == "e1c1"
+    rook = queenside_board.get_piece_at((3, 0))
+    assert rook is not None and rook.__class__.__name__ == "Rook"
+
+
+def test_castling_rejected_when_path_square_is_attacked():
+    board = _empty_board()
+    _place(board, King("white", (4, 0)))
+    _place(board, Rook("white", (7, 0)))
+    _place(board, Rook("black", (5, 7)))
+
+    try:
+        apply_coordinate_move(board, "white", "e1g1")
+        assert False, "Expected castling through check to be rejected"
+    except ValueError as error:
+        assert str(error) == "Illegal move for that piece"
+
+
 def test_savefile_records_moves():
     with tempfile.TemporaryDirectory() as temp_dir:
         savefile_path = f"{temp_dir}/moves.log"
@@ -210,6 +271,10 @@ def run_all_tests():
         test_apply_coordinate_move_rejects_wrong_turn_piece,
         test_apply_coordinate_move_allows_capture,
         test_last_game_scenario_attempted_moves,
+        test_en_passant_capture_is_available_immediately,
+        test_en_passant_expires_after_one_turn,
+        test_castling_kingside_and_queenside,
+        test_castling_rejected_when_path_square_is_attacked,
         test_savefile_records_moves,
     ]
 

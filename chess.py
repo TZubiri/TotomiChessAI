@@ -126,12 +126,16 @@ class Board:
     def __init__(self):
         self.board = [[None for _ in range(8)] for _ in range(8)]
         self.pieces = []
+        self.en_passant_target = None
+        self.en_passant_capture_position = None
         self.setup_starting_position()
     
     def setup_starting_position(self):
         # Clear board
         self.board = [[None for _ in range(8)] for _ in range(8)]
         self.pieces = []
+        self.en_passant_target = None
+        self.en_passant_capture_position = None
         
         # White pieces
         self.add_piece('white', 'rook', (0, 0))
@@ -184,6 +188,120 @@ class Board:
     def is_valid_position(self, position):
         col, row = position
         return 0 <= col < 8 and 0 <= row < 8
+
+    def get_opponent_color(self, color):
+        return 'black' if color == 'white' else 'white'
+
+    def _sliding_piece_attacks_square(self, piece, target_position, directions):
+        for col_step, row_step in directions:
+            current_col = piece.position[0] + col_step
+            current_row = piece.position[1] + row_step
+            while self.is_valid_position((current_col, current_row)):
+                if (current_col, current_row) == target_position:
+                    return True
+                if self.get_piece_at((current_col, current_row)) is not None:
+                    break
+                current_col += col_step
+                current_row += row_step
+        return False
+
+    def piece_attacks_square(self, piece, target_position):
+        piece_col, piece_row = piece.position
+        target_col, target_row = target_position
+
+        if isinstance(piece, Pawn):
+            direction = 1 if piece.color == 'white' else -1
+            return (target_col, target_row) in {
+                (piece_col - 1, piece_row + direction),
+                (piece_col + 1, piece_row + direction),
+            }
+
+        if isinstance(piece, Knight):
+            return (abs(piece_col - target_col), abs(piece_row - target_row)) in {
+                (1, 2),
+                (2, 1),
+            }
+
+        if isinstance(piece, Bishop):
+            return self._sliding_piece_attacks_square(
+                piece,
+                target_position,
+                [(-1, -1), (-1, 1), (1, -1), (1, 1)],
+            )
+
+        if isinstance(piece, Rook):
+            return self._sliding_piece_attacks_square(
+                piece,
+                target_position,
+                [(-1, 0), (1, 0), (0, -1), (0, 1)],
+            )
+
+        if isinstance(piece, Queen):
+            return self._sliding_piece_attacks_square(
+                piece,
+                target_position,
+                [
+                    (-1, -1),
+                    (-1, 1),
+                    (1, -1),
+                    (1, 1),
+                    (-1, 0),
+                    (1, 0),
+                    (0, -1),
+                    (0, 1),
+                ],
+            )
+
+        if isinstance(piece, King):
+            return max(abs(piece_col - target_col), abs(piece_row - target_row)) == 1
+
+        return False
+
+    def is_square_attacked(self, position, by_color):
+        for piece in self.pieces:
+            if piece.color == by_color and self.piece_attacks_square(piece, position):
+                return True
+        return False
+
+    def get_castling_moves(self, king):
+        if king.moved:
+            return []
+
+        home_row = 0 if king.color == 'white' else 7
+        if king.position != (4, home_row):
+            return []
+
+        opponent_color = self.get_opponent_color(king.color)
+        if self.is_square_attacked((4, home_row), opponent_color):
+            return []
+
+        castle_rules = [
+            {
+                'rook_position': (7, home_row),
+                'required_empty': [(5, home_row), (6, home_row)],
+                'safe_for_king': [(5, home_row), (6, home_row)],
+                'king_destination': (6, home_row),
+            },
+            {
+                'rook_position': (0, home_row),
+                'required_empty': [(1, home_row), (2, home_row), (3, home_row)],
+                'safe_for_king': [(3, home_row), (2, home_row)],
+                'king_destination': (2, home_row),
+            },
+        ]
+
+        available_moves = []
+        for rule in castle_rules:
+            rook = self.get_piece_at(rule['rook_position'])
+            if not isinstance(rook, Rook) or rook.color != king.color or rook.moved:
+                continue
+            if any(self.get_piece_at(position) is not None for position in rule['required_empty']):
+                continue
+            if any(self.is_square_attacked(position, opponent_color) for position in rule['safe_for_king']):
+                continue
+            available_moves.append(rule['king_destination'])
+
+        return available_moves
     
     def remove_piece_at(self, position):
         col, row = position
@@ -197,13 +315,51 @@ class Board:
         piece = self.get_piece_at(from_pos)
         if not piece:
             return False
+
+        from_col, from_row = from_pos
+        to_col, to_row = to_pos
         target_piece = self.get_piece_at(to_pos)
-        if target_piece is not None:
+
+        is_en_passant_capture = (
+            isinstance(piece, Pawn)
+            and target_piece is None
+            and from_col != to_col
+            and self.en_passant_target == to_pos
+            and self.en_passant_capture_position is not None
+        )
+
+        if is_en_passant_capture:
+            self.remove_piece_at(self.en_passant_capture_position)
+        elif target_piece is not None:
             self.remove_piece_at(to_pos)
+
         self.board[from_pos[1]][from_pos[0]] = None
         self.board[to_pos[1]][to_pos[0]] = piece
         piece.position = to_pos
+
+        is_castling_move = isinstance(piece, King) and abs(to_col - from_col) == 2
+        if is_castling_move:
+            if to_col > from_col:
+                rook_from = (7, from_row)
+                rook_to = (5, from_row)
+            else:
+                rook_from = (0, from_row)
+                rook_to = (3, from_row)
+            rook = self.get_piece_at(rook_from)
+            if isinstance(rook, Rook):
+                self.board[rook_from[1]][rook_from[0]] = None
+                self.board[rook_to[1]][rook_to[0]] = rook
+                rook.position = rook_to
+                rook.moved = True
+
         piece.moved = True
+
+        self.en_passant_target = None
+        self.en_passant_capture_position = None
+        if isinstance(piece, Pawn) and abs(to_row - from_row) == 2:
+            self.en_passant_target = (from_col, (from_row + to_row) // 2)
+            self.en_passant_capture_position = (to_col, to_row)
+
         return True
     
     def __str__(self):
@@ -306,6 +462,15 @@ class Pawn(Piece):
                 target_piece = board.get_piece_at((capture_col, capture_row))
                 if target_piece is not None and target_piece.color != self.color:
                     moves.append((capture_col, capture_row))
+                elif board.en_passant_target == (capture_col, capture_row):
+                    capture_position = board.en_passant_capture_position
+                    captured_piece = board.get_piece_at(capture_position) if capture_position else None
+                    if (
+                        isinstance(captured_piece, Pawn)
+                        and captured_piece.color != self.color
+                        and capture_position == (capture_col, row)
+                    ):
+                        moves.append((capture_col, capture_row))
         
         return moves
 
@@ -403,9 +568,15 @@ class King(Piece):
         
         for dcol, drow in directions:
             new_col, new_row = col + dcol, row + drow
-            if self.is_valid_position((new_col, new_row)) and self.can_occupy(board, (new_col, new_row)):
+            if (
+                self.is_valid_position((new_col, new_row))
+                and self.can_occupy(board, (new_col, new_row))
+                and not board.is_square_attacked((new_col, new_row), board.get_opponent_color(self.color))
+            ):
                 moves.append((new_col, new_row))
-        
+
+        moves.extend(board.get_castling_moves(self))
+
         return moves
 
 if __name__ == "__main__":
