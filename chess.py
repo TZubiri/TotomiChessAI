@@ -1,3 +1,63 @@
+import re
+
+
+PIECE_SYMBOLS = {
+    "": "pawn",
+    "N": "knight",
+    "B": "bishop",
+    "R": "rook",
+    "Q": "queen",
+    "K": "king",
+}
+
+
+def square_to_position(square):
+    if len(square) != 2:
+        raise ValueError(f"Invalid square: {square}")
+    file_char, rank_char = square[0], square[1]
+    if file_char not in "abcdefgh" or rank_char not in "12345678":
+        raise ValueError(f"Invalid square: {square}")
+    return ord(file_char) - ord("a"), int(rank_char) - 1
+
+
+def position_to_square(position):
+    col, row = position
+    if not (0 <= col < 8 and 0 <= row < 8):
+        raise ValueError(f"Invalid position: {position}")
+    return f"{chr(ord('a') + col)}{row + 1}"
+
+
+def parse_algebraic_move(move_text):
+    text = move_text.strip()
+    if not text:
+        raise ValueError("Move cannot be empty")
+
+    normalized = text.replace("0", "O")
+    if normalized in {"O-O", "O-O-O"}:
+        raise ValueError("Castling is not supported yet")
+
+    normalized = re.sub(r"[+#?!]+$", "", normalized)
+    match = re.match(
+        r"^(?P<piece>[KQRBN])?(?P<from_file>[a-h])?(?P<from_rank>[1-8])?(?P<capture>x)?(?P<to>[a-h][1-8])(?P<promotion>=?[QRBN])?$",
+        normalized,
+    )
+    if not match:
+        raise ValueError(f"Invalid algebraic move: {move_text}")
+
+    groups = match.groupdict()
+    if groups["promotion"]:
+        raise ValueError("Promotion is not supported yet")
+
+    piece_type = PIECE_SYMBOLS[groups["piece"] or ""]
+    return {
+        "piece_type": piece_type,
+        "from_file": groups["from_file"],
+        "from_rank": int(groups["from_rank"]) if groups["from_rank"] else None,
+        "is_capture": bool(groups["capture"]),
+        "to_square": groups["to"],
+    }
+
+
 class Piece:
     def __init__(self, color, position):
         self.color = color
@@ -138,24 +198,107 @@ class Board:
     
     def move_piece(self, from_pos, to_pos):
         piece = self.get_piece_at(from_pos)
-        if piece:
-            self.remove_piece_at(from_pos)
-            self.board[to_pos[1]][to_pos[0]] = piece
-            piece.position = to_pos
-            piece.moved = True
+        if not piece:
+            return False
+        target_piece = self.get_piece_at(to_pos)
+        if target_piece is not None:
+            self.remove_piece_at(to_pos)
+        self.remove_piece_at(from_pos)
+        self.board[to_pos[1]][to_pos[0]] = piece
+        piece.position = to_pos
+        piece.moved = True
+        return True
     
     def __str__(self):
         board_str = "  a b c d e f g h\n"
-        for row_idx, row in enumerate(self.board):
-            board_str += f"{8 - row_idx} "
+        for row_idx in range(7, -1, -1):
+            row = self.board[row_idx]
+            board_str += f"{row_idx + 1} "
             for piece in row:
                 if piece:
                     board_str += f"{piece.symbol} "
                 else:
                     board_str += ". "
-            board_str += f"{8 - row_idx}\n"
+            board_str += f"{row_idx + 1}\n"
         board_str += "  a b c d e f g h"
         return board_str
+
+
+def find_legal_move_candidates(board, color, parsed_move):
+    to_position = square_to_position(parsed_move["to_square"])
+    expected_type = parsed_move["piece_type"]
+
+    from_file = parsed_move["from_file"]
+    from_rank = parsed_move["from_rank"]
+
+    candidates = []
+    for piece in board.pieces:
+        if piece.color != color:
+            continue
+        if piece.__class__.__name__.lower() != expected_type:
+            continue
+        if from_file is not None and piece.position[0] != ord(from_file) - ord("a"):
+            continue
+        if from_rank is not None and piece.position[1] != from_rank - 1:
+            continue
+        if to_position in piece.get_legal_moves(board):
+            candidates.append(piece)
+
+    return candidates, to_position
+
+
+def apply_algebraic_move(board, color, move_text):
+    parsed_move = parse_algebraic_move(move_text)
+    candidates, to_position = find_legal_move_candidates(board, color, parsed_move)
+
+    target_piece = board.get_piece_at(to_position)
+    if parsed_move["is_capture"] and (target_piece is None or target_piece.color == color):
+        raise ValueError("Move indicates capture, but no capturable piece is on target square")
+    if not parsed_move["is_capture"] and target_piece is not None and target_piece.color != color:
+        raise ValueError("Capture must include 'x' in algebraic notation")
+
+    if not candidates:
+        raise ValueError("No legal piece can make that move")
+    if len(candidates) > 1:
+        raise ValueError("Ambiguous move: multiple pieces can make that move")
+
+    piece = candidates[0]
+    board.move_piece(piece.position, to_position)
+    return piece, to_position
+
+
+def has_legal_move(board, color):
+    for piece in board.pieces:
+        if piece.color == color and piece.get_legal_moves(board):
+            return True
+    return False
+
+
+def play_cli():
+    board = Board()
+    current_turn = "white"
+
+    print("Play chess with algebraic notation (examples: e4, Nf3, Bxe6).")
+    print("Type 'quit' to exit.")
+
+    while True:
+        print()
+        print(board)
+        if not has_legal_move(board, current_turn):
+            print(f"{current_turn.capitalize()} has no legal moves. Game over.")
+            return
+
+        move_text = input(f"{current_turn}> ").strip()
+        if move_text.lower() in {"quit", "exit"}:
+            print("Goodbye")
+            return
+
+        try:
+            piece, to_position = apply_algebraic_move(board, current_turn, move_text)
+            print(f"Moved {piece.__class__.__name__} to {position_to_square(to_position)}")
+            current_turn = "black" if current_turn == "white" else "white"
+        except ValueError as error:
+            print(f"Illegal move: {error}")
 
 class Pawn(Piece):
     def __init__(self, color, position):
@@ -289,19 +432,5 @@ class King(Piece):
         
         return moves
 
-# Test the implementation
 if __name__ == "__main__":
-    board = Board()
-    print("Starting Position:")
-    print(board)
-    
-    # Test knight moves from starting position
-    white_knight = board.get_piece_at((1, 0))
-    if white_knight:
-        print(f"\nWhite knight at {white_knight.position} can move to:")
-        print(white_knight.get_legal_moves(board))
-    
-    black_knight = board.get_piece_at((1, 7))
-    if black_knight:
-        print(f"Black knight at {black_knight.position} can move to:")
-        print(black_knight.get_legal_moves(board))
+    play_cli()

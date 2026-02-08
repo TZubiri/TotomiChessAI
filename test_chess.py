@@ -1,4 +1,4 @@
-from chess import Board, Pawn, Rook
+from chess import Board, Pawn, Rook, apply_algebraic_move, parse_algebraic_move
 
 
 def _empty_board():
@@ -12,12 +12,6 @@ def _place(board, piece):
     col, row = piece.position
     board.board[row][col] = piece
     board.pieces.append(piece)
-    return piece
-
-
-def _piece_at(board, position):
-    piece = board.get_piece_at(position)
-    assert piece is not None
     return piece
 
 
@@ -90,11 +84,75 @@ def test_pawn_forward_and_diagonal_captures():
     assert set(pawn.get_legal_moves(board)) == {(4, 2), (4, 3), (3, 2), (5, 2)}
 
 
+def test_parse_algebraic_move():
+    assert parse_algebraic_move("e4") == {
+        "piece_type": "pawn",
+        "from_file": None,
+        "from_rank": None,
+        "is_capture": False,
+        "to_square": "e4",
+    }
+    assert parse_algebraic_move("Nf3") == {
+        "piece_type": "knight",
+        "from_file": None,
+        "from_rank": None,
+        "is_capture": False,
+        "to_square": "f3",
+    }
+    assert parse_algebraic_move("exd5") == {
+        "piece_type": "pawn",
+        "from_file": "e",
+        "from_rank": None,
+        "is_capture": True,
+        "to_square": "d5",
+    }
+
+
+def test_apply_algebraic_move_from_starting_position():
+    board = Board()
+
+    piece, to_position = apply_algebraic_move(board, "white", "e4")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (4, 3)
+    assert board.get_piece_at((4, 1)) is None
+    assert board.get_piece_at((4, 3)) == piece
+
+
+def test_apply_algebraic_move_rejects_illegal_move():
+    board = Board()
+
+    try:
+        apply_algebraic_move(board, "white", "e5")
+        assert False, "Expected illegal move error"
+    except ValueError as error:
+        assert str(error) == "No legal piece can make that move"
+
+
+def test_apply_algebraic_move_requires_capture_marker():
+    board = _empty_board()
+    _place(board, Pawn("white", (4, 3)))
+    _place(board, Pawn("black", (3, 4)))
+
+    try:
+        apply_algebraic_move(board, "white", "d5")
+        assert False, "Expected capture marker error"
+    except ValueError as error:
+        assert str(error) == "Capture must include 'x' in algebraic notation"
+
+    piece, to_position = apply_algebraic_move(board, "white", "exd5")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (3, 4)
+
+
 def run_all_tests():
     tests = [
         test_position_move_counts,
         test_rook_path_obstruction_and_capture,
         test_pawn_forward_and_diagonal_captures,
+        test_parse_algebraic_move,
+        test_apply_algebraic_move_from_starting_position,
+        test_apply_algebraic_move_rejects_illegal_move,
+        test_apply_algebraic_move_requires_capture_marker,
     ]
 
     for test in tests:
