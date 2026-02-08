@@ -11,6 +11,34 @@ class Piece:
         col, row = position
         return 0 <= col < 8 and 0 <= row < 8
 
+    def can_occupy(self, board, position):
+        target_piece = board.get_piece_at(position)
+        return target_piece is None or target_piece.color != self.color
+
+    def is_path_obstructed(self, board, to_position):
+        from_col, from_row = self.position
+        to_col, to_row = to_position
+
+        col_delta = to_col - from_col
+        row_delta = to_row - from_row
+
+        step_col = 0 if col_delta == 0 else col_delta // abs(col_delta)
+        step_row = 0 if row_delta == 0 else row_delta // abs(row_delta)
+
+        if step_col == 0 and step_row == 0:
+            return False
+
+        current_col = from_col + step_col
+        current_row = from_row + step_row
+
+        while (current_col, current_row) != (to_col, to_row):
+            if board.get_piece_at((current_col, current_row)) is not None:
+                return True
+            current_col += step_col
+            current_row += step_row
+
+        return False
+
     def __repr__(self):
         return f"{self.__class__.__name__}({self.color}, {self.position})"
 
@@ -32,8 +60,8 @@ class Knight(Piece):
         for col_offset, row_offset in knight_moves:
             new_col = col + col_offset
             new_row = row + row_offset
-            
-            if board.is_valid_position((new_col, new_row)):
+
+            if self.is_valid_position((new_col, new_row)) and self.can_occupy(board, (new_col, new_row)):
                 moves.append((new_col, new_row))
         
         return moves
@@ -96,6 +124,10 @@ class Board:
         if 0 <= col < 8 and 0 <= row < 8:
             return self.board[row][col]
         return None
+
+    def is_valid_position(self, position):
+        col, row = position
+        return 0 <= col < 8 and 0 <= row < 8
     
     def remove_piece_at(self, position):
         col, row = position
@@ -138,14 +170,23 @@ class Pawn(Piece):
         
         # One step forward
         new_row = row + direction
-        if 0 <= new_row < 8:
+        if 0 <= new_row < 8 and board.get_piece_at((col, new_row)) is None:
             moves.append((col, new_row))
         
         # Two steps forward from starting position
         if (self.color == 'white' and row == 1) or (self.color == 'black' and row == 6):
             two_steps = row + 2 * direction
-            if 0 <= two_steps < 8:
+            if 0 <= two_steps < 8 and board.get_piece_at((col, row + direction)) is None and board.get_piece_at((col, two_steps)) is None:
                 moves.append((col, two_steps))
+
+        # Captures
+        for col_offset in (-1, 1):
+            capture_col = col + col_offset
+            capture_row = row + direction
+            if self.is_valid_position((capture_col, capture_row)):
+                target_piece = board.get_piece_at((capture_col, capture_row))
+                if target_piece is not None and target_piece.color != self.color:
+                    moves.append((capture_col, capture_row))
         
         return moves
 
@@ -164,7 +205,12 @@ class Bishop(Piece):
         for dcol, drow in directions:
             new_col, new_row = col + dcol, row + drow
             while self.is_valid_position((new_col, new_row)):
-                moves.append((new_col, new_row))
+                if self.is_path_obstructed(board, (new_col, new_row)):
+                    break
+                if self.can_occupy(board, (new_col, new_row)):
+                    moves.append((new_col, new_row))
+                if board.get_piece_at((new_col, new_row)) is not None:
+                    break
                 new_col += dcol
                 new_row += drow
         
@@ -185,7 +231,12 @@ class Rook(Piece):
         for dcol, drow in directions:
             new_col, new_row = col + dcol, row + drow
             while self.is_valid_position((new_col, new_row)):
-                moves.append((new_col, new_row))
+                if self.is_path_obstructed(board, (new_col, new_row)):
+                    break
+                if self.can_occupy(board, (new_col, new_row)):
+                    moves.append((new_col, new_row))
+                if board.get_piece_at((new_col, new_row)) is not None:
+                    break
                 new_col += dcol
                 new_row += drow
         
@@ -207,7 +258,12 @@ class Queen(Piece):
         for dcol, drow in directions:
             new_col, new_row = col + dcol, row + drow
             while self.is_valid_position((new_col, new_row)):
-                moves.append((new_col, new_row))
+                if self.is_path_obstructed(board, (new_col, new_row)):
+                    break
+                if self.can_occupy(board, (new_col, new_row)):
+                    moves.append((new_col, new_row))
+                if board.get_piece_at((new_col, new_row)) is not None:
+                    break
                 new_col += dcol
                 new_row += drow
         
@@ -228,7 +284,7 @@ class King(Piece):
         
         for dcol, drow in directions:
             new_col, new_row = col + dcol, row + drow
-            if self.is_valid_position((new_col, new_row)):
+            if self.is_valid_position((new_col, new_row)) and self.can_occupy(board, (new_col, new_row)):
                 moves.append((new_col, new_row))
         
         return moves
