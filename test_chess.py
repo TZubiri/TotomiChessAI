@@ -380,8 +380,8 @@ def test_apply_random_ai_move_fails_without_legal_moves():
 
 def test_ai_profiles_and_minimax_selection():
     profiles = get_ai_profiles()
-    assert len(profiles) == 12
-    assert any(profile["plies"] == 0 for profile in profiles)
+    assert len(profiles) == 10
+    assert sum(1 for profile in profiles if profile["plies"] == 0) == 1
     assert any(profile["plies"] == 3 for profile in profiles)
 
     board = Board()

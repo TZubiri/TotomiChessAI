@@ -55,11 +55,18 @@ AI_PERSONALITIES = [
 ]
 
 AI_DIFFICULTIES = [
-    {"plies": 0, "name": "Drifter"},
     {"plies": 1, "name": "Scout"},
     {"plies": 2, "name": "Thinker"},
     {"plies": 3, "name": "Oracle"},
 ]
+
+RANDOM_AI_PROFILE = {
+    "id": "d0_random",
+    "name": "Drifter Random",
+    "plies": 0,
+    "personality_name": "Random",
+    "piece_values": AI_PERSONALITIES[0]["piece_values"],
+}
 
 
 def square_to_position(square):
@@ -147,7 +154,7 @@ def parse_algebraic_move(move_text):
 
 
 def get_ai_profiles():
-    profiles = []
+    profiles = [RANDOM_AI_PROFILE]
     for difficulty in AI_DIFFICULTIES:
         for personality in AI_PERSONALITIES:
             profiles.append(
@@ -845,14 +852,7 @@ def apply_ai_move(board, color, ai_profile, rng=None):
 
 
 def apply_random_ai_move(board, color, rng=None):
-    random_profile = {
-        "id": "d0_basic",
-        "name": "Drifter Classic",
-        "plies": 0,
-        "personality_name": "Classic",
-        "piece_values": AI_PERSONALITIES[0]["piece_values"],
-    }
-    return apply_ai_move(board, color, random_profile, rng=rng)
+    return apply_ai_move(board, color, RANDOM_AI_PROFILE, rng=rng)
 
 
 def choose_menu_option(options, prompt_text, default_index=0):
