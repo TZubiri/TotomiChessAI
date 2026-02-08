@@ -3,10 +3,9 @@ from datetime import datetime
 import os
 import copy
 import random
-import math
 
 
-DEFAULT_SAVEFILE = "chess_save.txt"
+DEFAULT_SAVEFILE = "chess_save.pgn"
 PIECE_TYPE_BY_CLASS = {
     "Pawn": "pawn",
     "Knight": "knight",
@@ -122,7 +121,6 @@ SPECIAL_AI_PROFILES = [
             "corner_touch_rook": 0.95,
         },
         "control_weight": 0.12,
-        "selective_second_ply_ratio": 1.0 / 3.0,
         "opposite_bishop_draw_factor": 0.5,
     }
 ]
@@ -247,18 +245,153 @@ def get_ai_profiles():
     return profiles
 
 
+def _status_to_pgn_result(status):
+    if status.get("winner") == "white":
+        return "1-0"
+    if status.get("winner") == "black":
+        return "0-1"
+    if status.get("state") == "draw":
+        return "1/2-1/2"
+    return "*"
+
+
+def _started_at_to_pgn_date(started_at):
+    try:
+        parsed = datetime.fromisoformat(started_at)
+        return parsed.strftime("%Y.%m.%d")
+    except ValueError:
+        return "????.??.??"
+
+
+def _build_pgn_header_lines(started_at, result="*"):
+    return [
+        "[Event \"OpenCode Chess CLI\"]",
+        "[Site \"Local\"]",
+        f"[Date \"{_started_at_to_pgn_date(started_at)}\"]",
+        "[Round \"-\"]",
+        "[White \"White\"]",
+        "[Black \"Black\"]",
+        f"[Result \"{result}\"]",
+        "[Variant \"We Eat Kings\"]",
+    ]
+
+
+def _move_to_pgn_fragment(move_number, color, move_text):
+    if color == "white":
+        return f"{(move_number + 1) // 2}. {move_text} "
+    if move_number % 2 == 1:
+        return f"{(move_number + 1) // 2}... {move_text} "
+    return f"{move_text} "
+
+
 def start_savefile(savefile_path):
     has_existing_content = os.path.exists(savefile_path) and os.path.getsize(savefile_path) > 0
     with open(savefile_path, "a", encoding="utf-8") as savefile:
         if has_existing_content:
             savefile.write("\n")
         started_at = datetime.now().isoformat(timespec="seconds")
-        savefile.write(f"=== Game started {started_at} ===\n")
+        for header_line in _build_pgn_header_lines(started_at, result="*"):
+            savefile.write(f"{header_line}\n")
+        savefile.write("\n")
 
 
 def record_move(savefile_path, move_number, color, move_text):
     with open(savefile_path, "a", encoding="utf-8") as savefile:
-        savefile.write(f"{move_number}. {color} {move_text}\n")
+        savefile.write(_move_to_pgn_fragment(move_number, color, move_text))
+
+
+def finalize_savefile(savefile_path, status):
+    result = _status_to_pgn_result(status)
+
+    with open(savefile_path, "r", encoding="utf-8") as savefile:
+        content = savefile.read()
+
+    last_result_tag_index = content.rfind("[Result \"*\"]")
+    if last_result_tag_index >= 0:
+        content = (
+            content[:last_result_tag_index]
+            + f"[Result \"{result}\"]"
+            + content[last_result_tag_index + len("[Result \"*\"]"):]
+        )
+        with open(savefile_path, "w", encoding="utf-8") as savefile:
+            savefile.write(content)
+
+    with open(savefile_path, "a", encoding="utf-8") as savefile:
+        savefile.write(f"{result}\n\n")
+
+
+def _parse_legacy_savefile_games(save_text):
+    games = []
+    current_game = None
+
+    for raw_line in save_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        header_match = re.match(r"^=== Game started (?P<started_at>.+) ===$", line)
+        if header_match:
+            if current_game is not None:
+                games.append(current_game)
+            current_game = {
+                "started_at": header_match.group("started_at"),
+                "moves": [],
+            }
+            continue
+
+        move_match = re.match(r"^(?P<move_number>\d+)\.\s+(?P<color>white|black)\s+(?P<move_text>\S+)$", line)
+        if move_match and current_game is not None:
+            current_game["moves"].append(
+                {
+                    "move_number": int(move_match.group("move_number")),
+                    "color": move_match.group("color"),
+                    "move_text": move_match.group("move_text"),
+                }
+            )
+
+    if current_game is not None:
+        games.append(current_game)
+
+    return games
+
+
+def convert_legacy_save_text_to_pgn(save_text):
+    games = _parse_legacy_savefile_games(save_text)
+    if not games:
+        raise ValueError("No legacy save games found")
+
+    pgn_chunks = []
+    for game in games:
+        header_lines = _build_pgn_header_lines(game["started_at"], result="*")
+        move_fragments = [
+            _move_to_pgn_fragment(move["move_number"], move["color"], move["move_text"])
+            for move in game["moves"]
+        ]
+        movetext = "".join(move_fragments).strip()
+        if movetext:
+            movetext = f"{movetext} *"
+        else:
+            movetext = "*"
+
+        pgn_chunks.append("\n".join(header_lines) + "\n\n" + movetext)
+
+    return "\n\n".join(pgn_chunks) + "\n"
+
+
+def convert_legacy_savefile_to_pgn(input_path, output_path=None):
+    with open(input_path, "r", encoding="utf-8") as input_file:
+        save_text = input_file.read()
+
+    pgn_text = convert_legacy_save_text_to_pgn(save_text)
+    resolved_output_path = output_path
+    if resolved_output_path is None:
+        root, _ = os.path.splitext(input_path)
+        resolved_output_path = f"{root}.pgn"
+
+    with open(resolved_output_path, "w", encoding="utf-8") as output_file:
+        output_file.write(pgn_text)
+
+    return resolved_output_path
 
 
 class Piece:
@@ -967,7 +1100,7 @@ def _has_opposite_color_bishops(board):
     return white_square_color != black_square_color
 
 
-def _evaluate_piece_value(
+def _evaluate_piece_scores(
     piece,
     board,
     piece_values,
@@ -976,7 +1109,8 @@ def _evaluate_piece_value(
     position_multipliers=None,
 ):
     piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
-    piece_score = piece_values[piece_type]
+    material_score = piece_values[piece_type]
+    piece_score = material_score
 
     if isinstance(piece, Pawn):
         if pawn_rank_values:
@@ -985,7 +1119,49 @@ def _evaluate_piece_value(
         if backward_pawn_value is not None and _is_backward_pawn(board, piece):
             piece_score = min(piece_score, backward_pawn_value)
 
-    return piece_score * _position_multiplier(piece, position_multipliers)
+    piece_score *= _position_multiplier(piece, position_multipliers)
+    heuristic_score = piece_score - material_score
+    return material_score, heuristic_score
+
+def evaluate_position_scores(
+    board,
+    perspective_color,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+):
+    material_score = 0.0
+    heuristic_score = 0.0
+    for piece in board.pieces:
+        piece_material, piece_heuristic = _evaluate_piece_scores(
+            piece,
+            board,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+        )
+        if piece.color == perspective_color:
+            material_score += piece_material
+            heuristic_score += piece_heuristic
+        else:
+            material_score -= piece_material
+            heuristic_score -= piece_heuristic
+
+    if control_weight:
+        heuristic_score += control_weight * _control_score(
+            board,
+            perspective_color,
+            position_multipliers,
+        )
+
+    if opposite_bishop_draw_factor is not None and _has_opposite_color_bishops(board):
+        heuristic_score *= opposite_bishop_draw_factor
+
+    return material_score, heuristic_score
 
 
 def evaluate_material(
@@ -998,64 +1174,17 @@ def evaluate_material(
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
 ):
-    score = 0.0
-    for piece in board.pieces:
-        piece_score = _evaluate_piece_value(
-            piece,
-            board,
-            piece_values,
-            pawn_rank_values=pawn_rank_values,
-            backward_pawn_value=backward_pawn_value,
-            position_multipliers=position_multipliers,
-        )
-        if piece.color == perspective_color:
-            score += piece_score
-        else:
-            score -= piece_score
-
-    if control_weight:
-        score += control_weight * _control_score(board, perspective_color, position_multipliers)
-
-    if opposite_bishop_draw_factor is not None and _has_opposite_color_bishops(board):
-        score *= opposite_bishop_draw_factor
-
-    return score
-
-
-def _selective_second_ply_moves(
-    board,
-    active_color,
-    legal_moves,
-    ratio,
-    piece_values,
-    pawn_rank_values=None,
-    backward_pawn_value=None,
-    position_multipliers=None,
-    control_weight=0.0,
-    opposite_bishop_draw_factor=None,
-):
-    if ratio is None or ratio <= 0 or ratio >= 1 or len(legal_moves) <= 1:
-        return legal_moves
-
-    keep = max(1, math.ceil(len(legal_moves) * ratio))
-    scored_moves = []
-    for from_pos, to_pos in legal_moves:
-        simulation = board.clone()
-        simulation.move_piece(from_pos, to_pos)
-        score = evaluate_material(
-            simulation,
-            active_color,
-            piece_values,
-            pawn_rank_values=pawn_rank_values,
-            backward_pawn_value=backward_pawn_value,
-            position_multipliers=position_multipliers,
-            control_weight=control_weight,
-            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
-        )
-        scored_moves.append((score, (from_pos, to_pos)))
-
-    scored_moves.sort(key=lambda entry: entry[0], reverse=True)
-    return [move for _, move in scored_moves[:keep]]
+    material_score, heuristic_score = evaluate_position_scores(
+        board,
+        perspective_color,
+        piece_values,
+        pawn_rank_values=pawn_rank_values,
+        backward_pawn_value=backward_pawn_value,
+        position_multipliers=position_multipliers,
+        control_weight=control_weight,
+        opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+    )
+    return material_score + heuristic_score
 
 
 def minimax_score(
@@ -1069,15 +1198,14 @@ def minimax_score(
     position_multipliers=None,
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
-    selective_second_ply_ratio=None,
 ):
     status = get_game_status(board, active_color)
     if status["winner"] is not None:
-        return 100000.0 if status["winner"] == perspective_color else -100000.0
+        return (100000.0, 0.0) if status["winner"] == perspective_color else (-100000.0, 0.0)
     if status["state"] == "draw":
-        return 0.0
+        return 0.0, 0.0
     if remaining_plies <= 0:
-        return evaluate_material(
+        return evaluate_position_scores(
             board,
             perspective_color,
             piece_values,
@@ -1089,23 +1217,10 @@ def minimax_score(
         )
 
     legal_moves = board.get_legal_moves_for_color(active_color)
-    if remaining_plies == 1:
-        legal_moves = _selective_second_ply_moves(
-            board,
-            active_color,
-            legal_moves,
-            selective_second_ply_ratio,
-            piece_values,
-            pawn_rank_values=pawn_rank_values,
-            backward_pawn_value=backward_pawn_value,
-            position_multipliers=position_multipliers,
-            control_weight=control_weight,
-            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
-        )
     next_color = board.get_opponent_color(active_color)
 
     if active_color == perspective_color:
-        best_score = float("-inf")
+        best_score = (float("-inf"), float("-inf"))
         for from_pos, to_pos in legal_moves:
             simulation = board.clone()
             simulation.move_piece(from_pos, to_pos)
@@ -1120,13 +1235,12 @@ def minimax_score(
                 position_multipliers=position_multipliers,
                 control_weight=control_weight,
                 opposite_bishop_draw_factor=opposite_bishop_draw_factor,
-                selective_second_ply_ratio=selective_second_ply_ratio,
             )
             if score > best_score:
                 best_score = score
         return best_score
 
-    best_score = float("inf")
+    best_score = (float("inf"), float("inf"))
     for from_pos, to_pos in legal_moves:
         simulation = board.clone()
         simulation.move_piece(from_pos, to_pos)
@@ -1141,7 +1255,6 @@ def minimax_score(
             position_multipliers=position_multipliers,
             control_weight=control_weight,
             opposite_bishop_draw_factor=opposite_bishop_draw_factor,
-            selective_second_ply_ratio=selective_second_ply_ratio,
         )
         if score < best_score:
             best_score = score
@@ -1168,7 +1281,6 @@ def choose_minimax_legal_move(
     position_multipliers=None,
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
-    selective_second_ply_ratio=None,
 ):
     legal_moves = board.get_legal_moves_for_color(color)
     if not legal_moves:
@@ -1178,7 +1290,7 @@ def choose_minimax_legal_move(
         return choose_random_legal_move(board, color, rng=rng)
 
     next_color = board.get_opponent_color(color)
-    best_score = float("-inf")
+    best_score = (float("-inf"), float("-inf"))
     best_moves = []
     for from_pos, to_pos in legal_moves:
         simulation = board.clone()
@@ -1194,7 +1306,6 @@ def choose_minimax_legal_move(
             position_multipliers=position_multipliers,
             control_weight=control_weight,
             opposite_bishop_draw_factor=opposite_bishop_draw_factor,
-            selective_second_ply_ratio=selective_second_ply_ratio,
         )
         if score > best_score:
             best_score = score
@@ -1220,7 +1331,6 @@ def choose_ai_move(board, color, ai_profile, rng=None):
         position_multipliers=ai_profile.get("position_multipliers"),
         control_weight=ai_profile.get("control_weight", 0.0),
         opposite_bishop_draw_factor=ai_profile.get("opposite_bishop_draw_factor"),
-        selective_second_ply_ratio=ai_profile.get("selective_second_ply_ratio"),
     )
 
 
@@ -1321,7 +1431,7 @@ def _match_result_message(status):
         return f"Draw by {status['reason'].replace('_', ' ')}."
     return "Match ended."
 
-def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE):
+def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=True):
     board = Board()
     current_turn = "white"
     move_number = 1
@@ -1344,12 +1454,17 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE):
                 print(_match_result_message(status))
             else:
                 print(_match_result_message(status))
+            finalize_savefile(savefile_path, status)
             return status
 
         if game_setup["mode"] == "ai_vs_ai":
             ai_profile = game_setup[f"{current_turn}_ai_profile"]
             piece, _, to_position, normalized_move = apply_ai_move(board, current_turn, ai_profile)
             record_move(savefile_path, move_number, current_turn, normalized_move)
+            if ai_vs_ai_show_board:
+                print(f"{move_number}. {current_turn} {normalized_move} ({piece.__class__.__name__} -> {position_to_square(to_position)})")
+                print(board)
+                print()
             move_number += 1
             current_turn = board.get_opponent_color(current_turn)
             continue
@@ -1365,7 +1480,9 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE):
         move_text = input(f"{current_turn}> ").strip()
         if move_text.lower() in {"quit", "exit"}:
             print("Returning to menu")
-            return {"state": "aborted", "reason": "quit", "winner": None}
+            status = {"state": "aborted", "reason": "quit", "winner": None}
+            finalize_savefile(savefile_path, status)
+            return status
 
         if move_text.lower() == "ai":
             try:

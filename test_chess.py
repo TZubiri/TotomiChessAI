@@ -17,9 +17,13 @@ from chess import (
     apply_random_ai_move,
     apply_user_move,
     choose_ai_move,
+    choose_minimax_legal_move,
     choose_random_legal_move,
+    convert_legacy_save_text_to_pgn,
     configure_game_menu,
     evaluate_material,
+    evaluate_position_scores,
+    finalize_savefile,
     get_ai_profiles,
     get_game_status,
     play_match,
@@ -486,7 +490,7 @@ def test_play_match_ai_vs_ai_returns_terminal_status():
     }
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        status = play_match(setup, savefile_path=f"{temp_dir}/match.log")
+        status = play_match(setup, savefile_path=f"{temp_dir}/match.log", ai_vs_ai_show_board=False)
 
     assert status["state"] in {"king_capture", "draw"}
 
@@ -522,7 +526,7 @@ def test_pawnwise_control_profile_drawish_opposite_bishops():
     profiles = get_ai_profiles()
     profile = next(profile for profile in profiles if profile["id"] == "d2_pawnwise_control")
 
-    baseline = evaluate_material(
+    baseline_material, baseline_heuristic = evaluate_position_scores(
         board,
         "white",
         profile["piece_values"],
@@ -532,7 +536,7 @@ def test_pawnwise_control_profile_drawish_opposite_bishops():
         control_weight=profile.get("control_weight", 0.0),
         opposite_bishop_draw_factor=None,
     )
-    drawish = evaluate_material(
+    drawish_material, drawish_heuristic = evaluate_position_scores(
         board,
         "white",
         profile["piece_values"],
@@ -543,8 +547,89 @@ def test_pawnwise_control_profile_drawish_opposite_bishops():
         opposite_bishop_draw_factor=profile.get("opposite_bishop_draw_factor"),
     )
 
-    assert baseline > 0
-    assert abs(drawish - (baseline * 0.5)) < 1e-9
+    assert drawish_material == baseline_material
+    assert baseline_heuristic != 0
+    assert abs(drawish_heuristic - (baseline_heuristic * profile["opposite_bishop_draw_factor"])) < 1e-9
+
+
+def test_position_heuristics_are_tie_breakers_for_major_pieces():
+    center_board = _empty_board()
+    corner_board = _empty_board()
+    _place(center_board, Queen("white", (3, 3)))
+    _place(corner_board, Queen("white", (0, 0)))
+
+    profiles = get_ai_profiles()
+    pawnwise = next(profile for profile in profiles if profile["id"] == "d2_pawnwise")
+
+    center_material, center_heuristic = evaluate_position_scores(
+        center_board,
+        "white",
+        pawnwise["piece_values"],
+        pawn_rank_values=pawnwise.get("pawn_rank_values"),
+        backward_pawn_value=pawnwise.get("backward_pawn_value"),
+        position_multipliers=pawnwise.get("position_multipliers"),
+    )
+    corner_material, corner_heuristic = evaluate_position_scores(
+        corner_board,
+        "white",
+        pawnwise["piece_values"],
+        pawn_rank_values=pawnwise.get("pawn_rank_values"),
+        backward_pawn_value=pawnwise.get("backward_pawn_value"),
+        position_multipliers=pawnwise.get("position_multipliers"),
+    )
+
+    assert center_material == corner_material
+    assert center_heuristic > corner_heuristic
+
+    center_total = evaluate_material(
+        center_board,
+        "white",
+        pawnwise["piece_values"],
+        pawn_rank_values=pawnwise.get("pawn_rank_values"),
+        backward_pawn_value=pawnwise.get("backward_pawn_value"),
+        position_multipliers=pawnwise.get("position_multipliers"),
+    )
+    assert abs(center_total - (center_material + center_heuristic)) < 1e-9
+
+
+def test_minimax_prefers_material_over_heuristic():
+    board = _empty_board()
+    _place(board, King("white", (7, 0)))
+    _place(board, King("black", (6, 7)))
+    _place(board, Queen("white", (3, 3)))
+    _place(board, Pawn("black", (0, 0)))
+
+    move = choose_minimax_legal_move(
+        board,
+        "white",
+        1,
+        {
+            "pawn": 1.0,
+            "knight": 3.0,
+            "bishop": 3.0,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 0.0,
+        },
+        rng=random.Random(0),
+        position_multipliers={
+            "center": 25.0,
+            "center_cross": 25.0,
+            "center_diagonal": 10.0,
+            "corner": 0.01,
+            "corner_rook": 0.01,
+            "corner_touch": 0.5,
+            "corner_touch_rook": 0.5,
+        },
+    )
+
+    assert move == ((3, 3), (0, 0))
+
+
+def test_pawnwise_control_profile_no_selective_second_ply_pruning():
+    profiles = get_ai_profiles()
+    profile = next(profile for profile in profiles if profile["id"] == "d2_pawnwise_control")
+    assert "selective_second_ply_ratio" not in profile
 
 
 def test_tournament_fixture_counts():
@@ -575,19 +660,45 @@ def test_tournament_writes_results_and_scoreboard():
 
 def test_savefile_records_moves():
     with tempfile.TemporaryDirectory() as temp_dir:
-        savefile_path = f"{temp_dir}/moves.log"
+        savefile_path = f"{temp_dir}/moves.pgn"
         start_savefile(savefile_path)
         record_move(savefile_path, 1, "white", "e4")
         record_move(savefile_path, 2, "black", "e5")
+        finalize_savefile(savefile_path, {"state": "draw", "reason": "stalemate", "winner": None})
 
         with open(savefile_path, "r", encoding="utf-8") as savefile:
             lines = [line.rstrip("\n") for line in savefile]
 
-    assert len(lines) == 3
-    assert lines[0].startswith("=== Game started ")
-    assert lines[0].endswith(" ===")
-    assert lines[1] == "1. white e4"
-    assert lines[2] == "2. black e5"
+    assert lines[0] == "[Event \"OpenCode Chess CLI\"]"
+    assert lines[1] == "[Site \"Local\"]"
+    assert lines[2].startswith("[Date \"")
+    assert lines[2].endswith("\"]")
+    assert lines[6] == "[Result \"1/2-1/2\"]"
+    assert lines[7] == "[Variant \"We Eat Kings\"]"
+    assert lines[8] == ""
+    assert lines[9] == "1. e4 e5 1/2-1/2"
+
+
+def test_convert_legacy_save_text_to_pgn():
+    legacy_text = "\n".join(
+        [
+            "=== Game started 2026-02-08T10:11:12 ===",
+            "1. white e2e4",
+            "2. black e7e5",
+            "3. white g1f3",
+            "",
+            "=== Game started 2026-02-08T11:22:33 ===",
+            "1. white d2d4",
+            "2. black d7d5",
+        ]
+    )
+
+    converted = convert_legacy_save_text_to_pgn(legacy_text)
+
+    assert "[Date \"2026.02.08\"]" in converted
+    assert "1. e2e4 e7e5 2. g1f3 *" in converted
+    assert "1. d2d4 d7d5 *" in converted
+    assert converted.count("[Event \"OpenCode Chess CLI\"]") == 2
 
 
 def run_all_tests():
@@ -622,9 +733,13 @@ def run_all_tests():
         test_play_match_ai_vs_ai_returns_terminal_status,
         test_pawnwise_profile_heuristics_affect_evaluation,
         test_pawnwise_control_profile_drawish_opposite_bishops,
+        test_position_heuristics_are_tie_breakers_for_major_pieces,
+        test_minimax_prefers_material_over_heuristic,
+        test_pawnwise_control_profile_no_selective_second_ply_pruning,
         test_tournament_fixture_counts,
         test_tournament_writes_results_and_scoreboard,
         test_savefile_records_moves,
+        test_convert_legacy_save_text_to_pgn,
     ]
 
     for test in tests:
