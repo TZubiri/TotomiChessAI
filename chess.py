@@ -3,6 +3,7 @@ from datetime import datetime
 import os
 import copy
 import random
+import math
 
 
 DEFAULT_SAVEFILE = "chess_save.txt"
@@ -60,6 +61,72 @@ AI_DIFFICULTIES = [
     {"plies": 3, "name": "Oracle"},
 ]
 
+SPECIAL_AI_PROFILES = [
+    {
+        "id": "d2_pawnwise",
+        "name": "Thinker Pawnwise",
+        "plies": 2,
+        "personality_name": "Pawnwise",
+        "piece_values": {
+            "pawn": 1.0,
+            "knight": 3.0,
+            "bishop": 3.0,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 0.0,
+        },
+        "pawn_rank_values": {
+            5: 1.1,
+            6: 1.3,
+            7: 1.5,
+            8: 8.0,
+        },
+        "backward_pawn_value": 0.8,
+        "position_multipliers": {
+            "center": 1.3,
+            "center_cross": 1.2,
+            "center_diagonal": 1.15,
+            "corner": 0.8,
+            "corner_rook": 0.9,
+            "corner_touch": 0.85,
+            "corner_touch_rook": 0.95,
+        },
+    },
+    {
+        "id": "d2_pawnwise_control",
+        "name": "Thinker Pawnwise Control",
+        "plies": 2,
+        "personality_name": "Pawnwise Control",
+        "piece_values": {
+            "pawn": 1.0,
+            "knight": 3.0,
+            "bishop": 3.0,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 0.0,
+        },
+        "pawn_rank_values": {
+            5: 1.1,
+            6: 1.3,
+            7: 1.5,
+            8: 8.0,
+        },
+        "backward_pawn_value": 0.8,
+        "position_multipliers": {
+            "center": 1.3,
+            "center_cross": 1.2,
+            "center_diagonal": 1.15,
+            "corner": 0.8,
+            "corner_rook": 0.9,
+            "corner_touch": 0.85,
+            "corner_touch_rook": 0.95,
+        },
+        "control_weight": 0.12,
+        "selective_second_ply_ratio": 1.0 / 3.0,
+        "opposite_bishop_draw_factor": 0.5,
+    }
+]
+
 RANDOM_AI_PROFILE = {
     "id": "d0_random",
     "name": "Drifter Random",
@@ -91,15 +158,18 @@ def parse_coordinate_move(move_text):
         raise ValueError("Move cannot be empty")
 
     normalized = text.lower()
-    match = re.match(r"^(?P<from>[a-h][1-8])(?P<to>[a-h][1-8])$", normalized)
+    match = re.match(r"^(?P<from>[a-h][1-8])(?P<to>[a-h][1-8])(?P<promotion>=?[qrbn])?$", normalized)
     if not match:
         raise ValueError("Invalid move format. Use source and destination, for example: e2e4")
 
     groups = match.groupdict()
+    promotion = groups["promotion"]
+    promotion_piece = promotion.replace("=", "") if promotion else None
     return {
         "from_square": groups["from"],
         "to_square": groups["to"],
-        "normalized": f"{groups['from']}{groups['to']}",
+        "promotion_piece": promotion_piece,
+        "normalized": f"{groups['from']}{groups['to']}{promotion_piece or ''}",
     }
 
 
@@ -119,7 +189,7 @@ def parse_algebraic_move(move_text):
         }
 
     match = re.match(
-        r"^(?P<piece>[KQRBNkqrbn])?(?P<from_file>[a-h])?(?P<from_rank>[1-8])?(?P<capture>x)?(?P<to>[a-h][1-8])$",
+        r"^(?P<piece>[KQRBNkqrbn])?(?P<from_file>[a-h])?(?P<from_rank>[1-8])?(?P<capture>x)?(?P<to>[a-h][1-8])(?P<promotion>=?[QRBNqrbn])?$",
         normalized,
     )
     if not match:
@@ -139,6 +209,11 @@ def parse_algebraic_move(move_text):
     if piece_letter and (groups["from_file"] or groups["from_rank"]):
         raise ValueError("Piece disambiguation is not supported; use source-destination notation")
 
+    promotion = groups["promotion"]
+    promotion_piece = promotion.replace("=", "").lower() if promotion else None
+    if promotion_piece is not None and piece_type != "pawn":
+        raise ValueError("Only pawns can promote")
+
     return {
         "kind": "piece_move",
         "piece_type": piece_type,
@@ -146,9 +221,11 @@ def parse_algebraic_move(move_text):
         "from_rank": int(groups["from_rank"]) if groups["from_rank"] else None,
         "is_capture": bool(groups["capture"]),
         "to_square": groups["to"],
+        "promotion_piece": promotion_piece,
         "normalized": (
             f"{piece_letter}{groups['from_file'] or ''}{groups['from_rank'] or ''}"
             f"{'x' if groups['capture'] else ''}{groups['to']}"
+            f"{f'={promotion_piece.upper()}' if promotion_piece else ''}"
         ),
     }
 
@@ -166,6 +243,7 @@ def get_ai_profiles():
                     "piece_values": personality["piece_values"],
                 }
             )
+    profiles.extend(SPECIAL_AI_PROFILES)
     return profiles
 
 
@@ -313,6 +391,21 @@ class Board:
             piece = piece_class(color, position)
             self.pieces.append(piece)
             self.board[position[1]][position[0]] = piece
+
+    def create_promoted_piece(self, color, position, promotion_piece):
+        piece_classes = {
+            'q': Queen,
+            'r': Rook,
+            'b': Bishop,
+            'n': Knight,
+        }
+        piece_class = piece_classes.get((promotion_piece or 'q').lower())
+        if piece_class is None:
+            raise ValueError(f"Invalid promotion piece: {promotion_piece}")
+
+        promoted_piece = piece_class(color, position)
+        promoted_piece.moved = True
+        return promoted_piece
     
     def get_piece_at(self, position):
         col, row = position
@@ -406,16 +499,14 @@ class Board:
             return False
         return self.is_square_attacked(king_position, self.get_opponent_color(color))
 
-    def is_legal_move(self, color, from_pos, to_pos):
+    def is_legal_move(self, color, from_pos, to_pos, promotion_piece=None):
         piece = self.get_piece_at(from_pos)
         if piece is None or piece.color != color:
             return False
         if to_pos not in piece.get_legal_moves(self):
             return False
-
-        simulation = self.clone()
-        simulation.move_piece(from_pos, to_pos, update_tracking=False)
-        return not simulation.is_in_check(color)
+        _ = promotion_piece
+        return True
 
     def has_legal_move(self, color):
         for piece in self.pieces:
@@ -517,21 +608,15 @@ class Board:
         if king.position != (4, home_row):
             return []
 
-        opponent_color = self.get_opponent_color(king.color)
-        if self.is_square_attacked((4, home_row), opponent_color):
-            return []
-
         castle_rules = [
             {
                 'rook_position': (7, home_row),
                 'required_empty': [(5, home_row), (6, home_row)],
-                'safe_for_king': [(5, home_row), (6, home_row)],
                 'king_destination': (6, home_row),
             },
             {
                 'rook_position': (0, home_row),
                 'required_empty': [(1, home_row), (2, home_row), (3, home_row)],
-                'safe_for_king': [(3, home_row), (2, home_row)],
                 'king_destination': (2, home_row),
             },
         ]
@@ -542,8 +627,6 @@ class Board:
             if not isinstance(rook, Rook) or rook.color != king.color or rook.moved:
                 continue
             if any(self.get_piece_at(position) is not None for position in rule['required_empty']):
-                continue
-            if any(self.is_square_attacked(position, opponent_color) for position in rule['safe_for_king']):
                 continue
             available_moves.append(rule['king_destination'])
 
@@ -557,7 +640,7 @@ class Board:
                 self.pieces.remove(piece)
             self.board[row][col] = None
     
-    def move_piece(self, from_pos, to_pos, update_tracking=True):
+    def move_piece(self, from_pos, to_pos, update_tracking=True, promotion_piece=None):
         piece = self.get_piece_at(from_pos)
         if not piece:
             return False
@@ -585,6 +668,16 @@ class Board:
         self.board[to_pos[1]][to_pos[0]] = piece
         piece.position = to_pos
 
+        is_pawn_move = isinstance(piece, Pawn)
+        is_promotion_rank = is_pawn_move and (to_row == 7 or to_row == 0)
+        if is_promotion_rank:
+            if piece in self.pieces:
+                self.pieces.remove(piece)
+            promoted_piece = self.create_promoted_piece(piece.color, to_pos, promotion_piece)
+            self.pieces.append(promoted_piece)
+            self.board[to_pos[1]][to_pos[0]] = promoted_piece
+            piece = promoted_piece
+
         is_castling_move = isinstance(piece, King) and abs(to_col - from_col) == 2
         if is_castling_move:
             if to_col > from_col:
@@ -609,7 +702,7 @@ class Board:
             self.en_passant_capture_position = (to_col, to_row)
 
         if update_tracking:
-            if isinstance(piece, Pawn) or is_capture:
+            if is_pawn_move or is_capture:
                 self.halfmove_clock = 0
             else:
                 self.halfmove_clock += 1
@@ -644,11 +737,13 @@ def apply_coordinate_move(board, color, move_text):
         raise ValueError(f"No piece at {parsed_move['from_square']}")
     if piece.color != color:
         raise ValueError(f"Piece at {parsed_move['from_square']} belongs to {piece.color}")
-    if not board.is_legal_move(color, from_position, to_position):
+
+    promotion_choice = _resolve_promotion_choice(piece, to_position, parsed_move["promotion_piece"])
+    if not board.is_legal_move(color, from_position, to_position, promotion_piece=promotion_choice):
         raise ValueError("Illegal move for that piece")
 
-    board.move_piece(from_position, to_position)
-    return piece, to_position, parsed_move["normalized"]
+    board.move_piece(from_position, to_position, promotion_piece=promotion_choice)
+    return board.get_piece_at(to_position), to_position, parsed_move["normalized"]
 
 
 def _piece_matches_type(piece, piece_type):
@@ -667,6 +762,16 @@ def _is_en_passant_capture_move(board, piece, to_position):
     )
 
 
+def _resolve_promotion_choice(piece, to_position, promotion_piece):
+    to_row = to_position[1]
+    reaches_promotion_rank = isinstance(piece, Pawn) and to_row in (0, 7)
+    if reaches_promotion_rank:
+        return (promotion_piece or "q").lower()
+    if promotion_piece is not None:
+        raise ValueError("Promotion piece is only valid for pawn promotion moves")
+    return None
+
+
 def apply_algebraic_move(board, color, move_text):
     parsed_move = parse_algebraic_move(move_text)
 
@@ -682,7 +787,7 @@ def apply_algebraic_move(board, color, move_text):
             raise ValueError("Castling is not legal in this position")
 
         board.move_piece(from_position, to_position)
-        return piece, to_position, parsed_move["normalized"]
+        return board.get_piece_at(to_position), to_position, parsed_move["normalized"]
 
     to_position = square_to_position(parsed_move["to_square"])
     candidate_pieces = []
@@ -711,8 +816,12 @@ def apply_algebraic_move(board, color, move_text):
     if not parsed_move["is_capture"] and is_capture:
         raise ValueError("Captures must include 'x' in algebraic notation")
 
-    board.move_piece(piece.position, to_position)
-    return piece, to_position, parsed_move["normalized"]
+    promotion_choice = _resolve_promotion_choice(piece, to_position, parsed_move["promotion_piece"])
+    if not board.is_legal_move(color, piece.position, to_position, promotion_piece=promotion_choice):
+        raise ValueError("No legal piece can make that algebraic move")
+
+    board.move_piece(piece.position, to_position, promotion_piece=promotion_choice)
+    return board.get_piece_at(to_position), to_position, parsed_move["normalized"]
 
 
 def apply_user_move(board, color, move_text):
@@ -731,6 +840,15 @@ def has_legal_move(board, color):
 
 
 def get_game_status(board, active_color):
+    white_king = board.find_king_position("white")
+    black_king = board.find_king_position("black")
+    if white_king is None and black_king is None:
+        return {"state": "draw", "reason": "both_kings_captured", "winner": None}
+    if white_king is None:
+        return {"state": "king_capture", "reason": "king_captured", "winner": "black"}
+    if black_king is None:
+        return {"state": "king_capture", "reason": "king_captured", "winner": "white"}
+
     if board.is_threefold_repetition(active_color):
         return {"state": "draw", "reason": "threefold_repetition", "winner": None}
 
@@ -738,39 +856,252 @@ def get_game_status(board, active_color):
         return {"state": "draw", "reason": "fifty_move_rule", "winner": None}
 
     if not board.has_legal_move(active_color):
-        if board.is_in_check(active_color):
-            return {
-                "state": "checkmate",
-                "reason": "checkmate",
-                "winner": board.get_opponent_color(active_color),
-            }
         return {"state": "draw", "reason": "stalemate", "winner": None}
 
     return {"state": "in_progress", "reason": None, "winner": None}
 
 
-def evaluate_material(board, perspective_color, piece_values):
+def _pawn_rank_for_value(pawn):
+    _, row = pawn.position
+    if pawn.color == "white":
+        return row + 1
+    return 8 - row
+
+
+def _is_backward_pawn(board, pawn):
+    if not isinstance(pawn, Pawn):
+        return False
+
+    col, row = pawn.position
+    direction = 1 if pawn.color == "white" else -1
+    forward_square = (col, row + direction)
+    if not board.is_valid_position(forward_square):
+        return False
+
+    has_adjacent_support = False
+    for adjacent_col in (col - 1, col + 1):
+        if not (0 <= adjacent_col < 8):
+            continue
+        for scan_row in range(8):
+            adjacent_piece = board.get_piece_at((adjacent_col, scan_row))
+            if not isinstance(adjacent_piece, Pawn) or adjacent_piece.color != pawn.color:
+                continue
+            if pawn.color == "white" and scan_row >= row:
+                has_adjacent_support = True
+            if pawn.color == "black" and scan_row <= row:
+                has_adjacent_support = True
+            if has_adjacent_support:
+                break
+        if has_adjacent_support:
+            break
+
+    if has_adjacent_support:
+        return False
+
+    opponent_color = board.get_opponent_color(pawn.color)
+    for piece in board.pieces:
+        if isinstance(piece, Pawn) and piece.color == opponent_color and board.piece_attacks_square(piece, forward_square):
+            return True
+
+    return False
+
+
+def _square_weight_for_piece(piece, square, position_multipliers):
+    if not position_multipliers:
+        return 1.0
+
+    col, row = square
+    center_squares = {(3, 3), (4, 3), (3, 4), (4, 4)}
+    center_cross_squares = {(2, 3), (2, 4), (3, 2), (4, 2), (5, 3), (5, 4), (3, 5), (4, 5)}
+    center_diagonal_squares = {(2, 2), (5, 2), (2, 5), (5, 5)}
+    corner_squares = {(0, 0), (7, 0), (0, 7), (7, 7)}
+    corner_touch_squares = {(1, 0), (0, 1), (6, 0), (7, 1), (0, 6), (1, 7), (6, 7), (7, 6)}
+
+    if (col, row) in corner_squares:
+        if isinstance(piece, Rook):
+            return position_multipliers.get("corner_rook", position_multipliers.get("corner", 1.0))
+        return position_multipliers.get("corner", 1.0)
+
+    if (col, row) in corner_touch_squares:
+        if isinstance(piece, Rook):
+            return position_multipliers.get("corner_touch_rook", position_multipliers.get("corner_touch", 1.0))
+        return position_multipliers.get("corner_touch", 1.0)
+
+    if (col, row) in center_squares:
+        return position_multipliers.get("center", 1.0)
+
+    if (col, row) in center_cross_squares:
+        return position_multipliers.get("center_cross", 1.0)
+
+    if (col, row) in center_diagonal_squares:
+        return position_multipliers.get("center_diagonal", 1.0)
+
+    return 1.0
+
+
+def _position_multiplier(piece, position_multipliers):
+    return _square_weight_for_piece(piece, piece.position, position_multipliers)
+
+
+def _control_score(board, perspective_color, position_multipliers):
+    total = 0.0
+    for piece in board.pieces:
+        controlled = 0.0
+        for square in piece.get_legal_moves(board):
+            controlled += _square_weight_for_piece(piece, square, position_multipliers)
+        if piece.color == perspective_color:
+            total += controlled
+        else:
+            total -= controlled
+    return total
+
+
+def _has_opposite_color_bishops(board):
+    white_bishops = [piece for piece in board.pieces if isinstance(piece, Bishop) and piece.color == "white"]
+    black_bishops = [piece for piece in board.pieces if isinstance(piece, Bishop) and piece.color == "black"]
+    if len(white_bishops) != 1 or len(black_bishops) != 1:
+        return False
+
+    white_square_color = (white_bishops[0].position[0] + white_bishops[0].position[1]) % 2
+    black_square_color = (black_bishops[0].position[0] + black_bishops[0].position[1]) % 2
+    return white_square_color != black_square_color
+
+
+def _evaluate_piece_value(
+    piece,
+    board,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+):
+    piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
+    piece_score = piece_values[piece_type]
+
+    if isinstance(piece, Pawn):
+        if pawn_rank_values:
+            pawn_rank = _pawn_rank_for_value(piece)
+            piece_score = max(piece_score, pawn_rank_values.get(pawn_rank, piece_score))
+        if backward_pawn_value is not None and _is_backward_pawn(board, piece):
+            piece_score = min(piece_score, backward_pawn_value)
+
+    return piece_score * _position_multiplier(piece, position_multipliers)
+
+
+def evaluate_material(
+    board,
+    perspective_color,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+):
     score = 0.0
     for piece in board.pieces:
-        piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
-        piece_score = piece_values[piece_type]
+        piece_score = _evaluate_piece_value(
+            piece,
+            board,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+        )
         if piece.color == perspective_color:
             score += piece_score
         else:
             score -= piece_score
+
+    if control_weight:
+        score += control_weight * _control_score(board, perspective_color, position_multipliers)
+
+    if opposite_bishop_draw_factor is not None and _has_opposite_color_bishops(board):
+        score *= opposite_bishop_draw_factor
+
     return score
 
 
-def minimax_score(board, active_color, perspective_color, remaining_plies, piece_values):
+def _selective_second_ply_moves(
+    board,
+    active_color,
+    legal_moves,
+    ratio,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+):
+    if ratio is None or ratio <= 0 or ratio >= 1 or len(legal_moves) <= 1:
+        return legal_moves
+
+    keep = max(1, math.ceil(len(legal_moves) * ratio))
+    scored_moves = []
+    for from_pos, to_pos in legal_moves:
+        simulation = board.clone()
+        simulation.move_piece(from_pos, to_pos)
+        score = evaluate_material(
+            simulation,
+            active_color,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        )
+        scored_moves.append((score, (from_pos, to_pos)))
+
+    scored_moves.sort(key=lambda entry: entry[0], reverse=True)
+    return [move for _, move in scored_moves[:keep]]
+
+
+def minimax_score(
+    board,
+    active_color,
+    perspective_color,
+    remaining_plies,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+    selective_second_ply_ratio=None,
+):
     status = get_game_status(board, active_color)
-    if status["state"] == "checkmate":
+    if status["winner"] is not None:
         return 100000.0 if status["winner"] == perspective_color else -100000.0
     if status["state"] == "draw":
         return 0.0
     if remaining_plies <= 0:
-        return evaluate_material(board, perspective_color, piece_values)
+        return evaluate_material(
+            board,
+            perspective_color,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        )
 
     legal_moves = board.get_legal_moves_for_color(active_color)
+    if remaining_plies == 1:
+        legal_moves = _selective_second_ply_moves(
+            board,
+            active_color,
+            legal_moves,
+            selective_second_ply_ratio,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        )
     next_color = board.get_opponent_color(active_color)
 
     if active_color == perspective_color:
@@ -778,7 +1109,19 @@ def minimax_score(board, active_color, perspective_color, remaining_plies, piece
         for from_pos, to_pos in legal_moves:
             simulation = board.clone()
             simulation.move_piece(from_pos, to_pos)
-            score = minimax_score(simulation, next_color, perspective_color, remaining_plies - 1, piece_values)
+            score = minimax_score(
+                simulation,
+                next_color,
+                perspective_color,
+                remaining_plies - 1,
+                piece_values,
+                pawn_rank_values=pawn_rank_values,
+                backward_pawn_value=backward_pawn_value,
+                position_multipliers=position_multipliers,
+                control_weight=control_weight,
+                opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+                selective_second_ply_ratio=selective_second_ply_ratio,
+            )
             if score > best_score:
                 best_score = score
         return best_score
@@ -787,7 +1130,19 @@ def minimax_score(board, active_color, perspective_color, remaining_plies, piece
     for from_pos, to_pos in legal_moves:
         simulation = board.clone()
         simulation.move_piece(from_pos, to_pos)
-        score = minimax_score(simulation, next_color, perspective_color, remaining_plies - 1, piece_values)
+        score = minimax_score(
+            simulation,
+            next_color,
+            perspective_color,
+            remaining_plies - 1,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+            selective_second_ply_ratio=selective_second_ply_ratio,
+        )
         if score < best_score:
             best_score = score
     return best_score
@@ -802,7 +1157,19 @@ def choose_random_legal_move(board, color, rng=None):
     return random_source.choice(legal_moves)
 
 
-def choose_minimax_legal_move(board, color, plies, piece_values, rng=None):
+def choose_minimax_legal_move(
+    board,
+    color,
+    plies,
+    piece_values,
+    rng=None,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+    selective_second_ply_ratio=None,
+):
     legal_moves = board.get_legal_moves_for_color(color)
     if not legal_moves:
         return None
@@ -816,7 +1183,19 @@ def choose_minimax_legal_move(board, color, plies, piece_values, rng=None):
     for from_pos, to_pos in legal_moves:
         simulation = board.clone()
         simulation.move_piece(from_pos, to_pos)
-        score = minimax_score(simulation, next_color, color, plies - 1, piece_values)
+        score = minimax_score(
+            simulation,
+            next_color,
+            color,
+            plies - 1,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+            selective_second_ply_ratio=selective_second_ply_ratio,
+        )
         if score > best_score:
             best_score = score
             best_moves = [(from_pos, to_pos)]
@@ -836,6 +1215,12 @@ def choose_ai_move(board, color, ai_profile, rng=None):
         ai_profile["plies"],
         ai_profile["piece_values"],
         rng=rng,
+        pawn_rank_values=ai_profile.get("pawn_rank_values"),
+        backward_pawn_value=ai_profile.get("backward_pawn_value"),
+        position_multipliers=ai_profile.get("position_multipliers"),
+        control_weight=ai_profile.get("control_weight", 0.0),
+        opposite_bishop_draw_factor=ai_profile.get("opposite_bishop_draw_factor"),
+        selective_second_ply_ratio=ai_profile.get("selective_second_ply_ratio"),
     )
 
 
@@ -845,8 +1230,8 @@ def apply_ai_move(board, color, ai_profile, rng=None):
         raise ValueError(f"No legal moves available for {color}")
 
     from_pos, to_pos = chosen_move
-    piece = board.get_piece_at(from_pos)
     board.move_piece(from_pos, to_pos)
+    piece = board.get_piece_at(to_pos)
     move_text = f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
     return piece, from_pos, to_pos, move_text
 
@@ -913,7 +1298,7 @@ def play_cli(savefile_path=DEFAULT_SAVEFILE):
     game_setup = configure_game_menu()
     start_savefile(savefile_path)
 
-    print("Play chess with coordinate or algebraic notation (e2e4, e4, Nf3, O-O).")
+    print("Play chess with coordinate or algebraic notation (e2e4, e7e8q, e4, Nf3, O-O, e8=Q).")
     print("Type 'ai' to let a random AI move for the current side.")
     print("Type 'quit' to exit.")
     print(f"Saving moves to {savefile_path}")
@@ -922,8 +1307,8 @@ def play_cli(savefile_path=DEFAULT_SAVEFILE):
         print()
         print(board)
         status = get_game_status(board, current_turn)
-        if status["state"] == "checkmate":
-            print(f"Checkmate. {status['winner'].capitalize()} wins.")
+        if status["winner"] is not None:
+            print(f"King captured. {status['winner'].capitalize()} wins.")
             return
         if status["state"] == "draw":
             print(f"Draw by {status['reason'].replace('_', ' ')}.")
@@ -1101,7 +1486,6 @@ class King(Piece):
             if (
                 self.is_valid_position((new_col, new_row))
                 and self.can_occupy(board, (new_col, new_row))
-                and not board.is_square_attacked((new_col, new_row), board.get_opponent_color(self.color))
             ):
                 moves.append((new_col, new_row))
 

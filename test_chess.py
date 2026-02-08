@@ -4,7 +4,9 @@ from pathlib import Path
 
 from chess import (
     Board,
+    Bishop,
     King,
+    Knight,
     Pawn,
     Queen,
     Rook,
@@ -15,6 +17,7 @@ from chess import (
     apply_user_move,
     choose_ai_move,
     choose_random_legal_move,
+    evaluate_material,
     get_ai_profiles,
     get_game_status,
     parse_algebraic_move,
@@ -126,12 +129,20 @@ def test_parse_coordinate_move():
     assert parse_coordinate_move("e2e4") == {
         "from_square": "e2",
         "to_square": "e4",
+        "promotion_piece": None,
         "normalized": "e2e4",
     }
     assert parse_coordinate_move("E7E5") == {
         "from_square": "e7",
         "to_square": "e5",
+        "promotion_piece": None,
         "normalized": "e7e5",
+    }
+    assert parse_coordinate_move("e7e8q") == {
+        "from_square": "e7",
+        "to_square": "e8",
+        "promotion_piece": "q",
+        "normalized": "e7e8q",
     }
 
 
@@ -143,6 +154,7 @@ def test_parse_algebraic_move():
         "from_rank": None,
         "is_capture": False,
         "to_square": "e4",
+        "promotion_piece": None,
         "normalized": "e4",
     }
     assert parse_algebraic_move("Nf3") == {
@@ -152,12 +164,23 @@ def test_parse_algebraic_move():
         "from_rank": None,
         "is_capture": False,
         "to_square": "f3",
+        "promotion_piece": None,
         "normalized": "Nf3",
     }
     assert parse_algebraic_move("O-O") == {
         "kind": "castle",
         "side": "kingside",
         "normalized": "O-O",
+    }
+    assert parse_algebraic_move("e8=Q") == {
+        "kind": "piece_move",
+        "piece_type": "pawn",
+        "from_file": None,
+        "from_rank": None,
+        "is_capture": False,
+        "to_square": "e8",
+        "promotion_piece": "q",
+        "normalized": "e8=Q",
     }
 
 
@@ -193,6 +216,28 @@ def test_apply_user_move_supports_both_notations():
     assert piece.__class__.__name__ == "Pawn"
     assert to_position == (4, 4)
     assert normalized_move == "e5"
+
+
+def test_apply_coordinate_move_promotes_pawn():
+    board = _empty_board()
+    _place(board, Pawn("white", (4, 6)))
+
+    piece, to_position, normalized_move = apply_coordinate_move(board, "white", "e7e8q")
+    assert isinstance(piece, Queen)
+    assert to_position == (4, 7)
+    assert normalized_move == "e7e8q"
+    assert isinstance(board.get_piece_at((4, 7)), Queen)
+
+
+def test_apply_algebraic_move_promotes_pawn():
+    board = _empty_board()
+    _place(board, Pawn("white", (4, 6)))
+
+    piece, to_position, normalized_move = apply_algebraic_move(board, "white", "e8=N")
+    assert isinstance(piece, Knight)
+    assert to_position == (4, 7)
+    assert normalized_move == "e8=N"
+    assert isinstance(board.get_piece_at((4, 7)), Knight)
 
 
 def test_apply_coordinate_move_rejects_illegal_move():
@@ -297,17 +342,16 @@ def test_castling_kingside_and_queenside():
     assert rook is not None and rook.__class__.__name__ == "Rook"
 
 
-def test_castling_rejected_when_path_square_is_attacked():
+def test_castling_allowed_even_when_path_square_is_attacked():
     board = _empty_board()
     _place(board, King("white", (4, 0)))
     _place(board, Rook("white", (7, 0)))
     _place(board, Rook("black", (5, 7)))
 
-    try:
-        apply_coordinate_move(board, "white", "e1g1")
-        assert False, "Expected castling through check to be rejected"
-    except ValueError as error:
-        assert str(error) == "Illegal move for that piece"
+    piece, to_position, normalized_move = apply_coordinate_move(board, "white", "e1g1")
+    assert piece.__class__.__name__ == "King"
+    assert to_position == (6, 0)
+    assert normalized_move == "e1g1"
 
 
 def test_threefold_repetition_draw_status():
@@ -337,14 +381,15 @@ def test_fifty_move_rule_draw_status():
     assert status == {"state": "draw", "reason": "fifty_move_rule", "winner": None}
 
 
-def test_stalemate_draw_status():
+def test_king_capture_ends_game():
     board = _empty_board()
-    _place(board, King("black", (0, 7)))
-    _place(board, King("white", (2, 5)))
-    _place(board, Queen("white", (2, 6)))
+    _place(board, King("white", (0, 0)))
+    _place(board, Queen("white", (3, 3)))
+    _place(board, King("black", (4, 4)))
 
+    apply_coordinate_move(board, "white", "d4e5")
     status = get_game_status(board, "black")
-    assert status == {"state": "draw", "reason": "stalemate", "winner": None}
+    assert status == {"state": "king_capture", "reason": "king_captured", "winner": "white"}
 
 
 def test_choose_random_legal_move_returns_legal_move():
@@ -382,9 +427,11 @@ def test_apply_random_ai_move_fails_without_legal_moves():
 
 def test_ai_profiles_and_minimax_selection():
     profiles = get_ai_profiles()
-    assert len(profiles) == 10
+    assert len(profiles) == 12
     assert sum(1 for profile in profiles if profile["plies"] == 0) == 1
     assert any(profile["plies"] == 3 for profile in profiles)
+    assert any(profile["id"] == "d2_pawnwise" for profile in profiles)
+    assert any(profile["id"] == "d2_pawnwise_control" for profile in profiles)
 
     board = Board()
     oracle_profile = next(profile for profile in profiles if profile["plies"] == 3 and profile["personality_name"] == "Classic")
@@ -397,10 +444,66 @@ def test_ai_profiles_and_minimax_selection():
     assert move_text == f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
 
 
+def test_pawnwise_profile_heuristics_affect_evaluation():
+    board = _empty_board()
+    _place(board, Pawn("white", (4, 4)))
+    _place(board, Pawn("black", (3, 6)))
+
+    profiles = get_ai_profiles()
+    pawnwise = next(profile for profile in profiles if profile["id"] == "d2_pawnwise")
+    classic = next(profile for profile in profiles if profile["id"] == "d2_basic")
+
+    classic_score = evaluate_material(board, "white", classic["piece_values"])
+    pawnwise_score = evaluate_material(
+        board,
+        "white",
+        pawnwise["piece_values"],
+        pawn_rank_values=pawnwise.get("pawn_rank_values"),
+        backward_pawn_value=pawnwise.get("backward_pawn_value"),
+        position_multipliers=pawnwise.get("position_multipliers"),
+    )
+
+    assert pawnwise_score != classic_score
+
+
+def test_pawnwise_control_profile_drawish_opposite_bishops():
+    board = _empty_board()
+    _place(board, Bishop("white", (2, 0)))
+    _place(board, Bishop("black", (2, 7)))
+    _place(board, Pawn("white", (4, 4)))
+
+    profiles = get_ai_profiles()
+    profile = next(profile for profile in profiles if profile["id"] == "d2_pawnwise_control")
+
+    baseline = evaluate_material(
+        board,
+        "white",
+        profile["piece_values"],
+        pawn_rank_values=profile.get("pawn_rank_values"),
+        backward_pawn_value=profile.get("backward_pawn_value"),
+        position_multipliers=profile.get("position_multipliers"),
+        control_weight=profile.get("control_weight", 0.0),
+        opposite_bishop_draw_factor=None,
+    )
+    drawish = evaluate_material(
+        board,
+        "white",
+        profile["piece_values"],
+        pawn_rank_values=profile.get("pawn_rank_values"),
+        backward_pawn_value=profile.get("backward_pawn_value"),
+        position_multipliers=profile.get("position_multipliers"),
+        control_weight=profile.get("control_weight", 0.0),
+        opposite_bishop_draw_factor=profile.get("opposite_bishop_draw_factor"),
+    )
+
+    assert baseline > 0
+    assert abs(drawish - (baseline * 0.5)) < 1e-9
+
+
 def test_tournament_fixture_counts():
     profiles = get_ai_profiles()
-    assert len(build_fixtures(profiles, "ordered")) == 90
-    assert len(build_fixtures(profiles, "single")) == 45
+    assert len(build_fixtures(profiles, "ordered")) == 132
+    assert len(build_fixtures(profiles, "single")) == 66
 
 
 def test_tournament_writes_results_and_scoreboard():
@@ -416,7 +519,7 @@ def test_tournament_writes_results_and_scoreboard():
 
         output_root = Path(temp_dir)
         assert manifest["match_count"] == 1
-        assert len(rows) == 10
+        assert len(rows) == 12
         assert (output_root / "scoreboard.csv").exists()
         assert (output_root / "scoreboard.json").exists()
         assert (output_root / "manifest.json").exists()
@@ -450,6 +553,8 @@ def run_all_tests():
         test_apply_coordinate_move_from_starting_position,
         test_apply_algebraic_move_from_starting_position,
         test_apply_user_move_supports_both_notations,
+        test_apply_coordinate_move_promotes_pawn,
+        test_apply_algebraic_move_promotes_pawn,
         test_apply_coordinate_move_rejects_illegal_move,
         test_apply_coordinate_move_rejects_wrong_turn_piece,
         test_apply_coordinate_move_allows_capture,
@@ -457,14 +562,16 @@ def run_all_tests():
         test_en_passant_capture_is_available_immediately,
         test_en_passant_expires_after_one_turn,
         test_castling_kingside_and_queenside,
-        test_castling_rejected_when_path_square_is_attacked,
+        test_castling_allowed_even_when_path_square_is_attacked,
         test_threefold_repetition_draw_status,
         test_fifty_move_rule_draw_status,
-        test_stalemate_draw_status,
+        test_king_capture_ends_game,
         test_choose_random_legal_move_returns_legal_move,
         test_apply_random_ai_move_executes_selected_legal_move,
         test_apply_random_ai_move_fails_without_legal_moves,
         test_ai_profiles_and_minimax_selection,
+        test_pawnwise_profile_heuristics_affect_evaluation,
+        test_pawnwise_control_profile_drawish_opposite_bishops,
         test_tournament_fixture_counts,
         test_tournament_writes_results_and_scoreboard,
         test_savefile_records_moves,
