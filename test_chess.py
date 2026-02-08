@@ -4,8 +4,8 @@ from chess import (
     Board,
     Pawn,
     Rook,
-    apply_algebraic_move,
-    parse_algebraic_move,
+    apply_coordinate_move,
+    parse_coordinate_move,
     record_move,
     start_savefile,
 )
@@ -94,64 +94,59 @@ def test_pawn_forward_and_diagonal_captures():
     assert set(pawn.get_legal_moves(board)) == {(4, 2), (4, 3), (3, 2), (5, 2)}
 
 
-def test_parse_algebraic_move():
-    assert parse_algebraic_move("e4") == {
-        "piece_type": "pawn",
-        "from_file": None,
-        "from_rank": None,
-        "is_capture": False,
+def test_parse_coordinate_move():
+    assert parse_coordinate_move("e2e4") == {
+        "from_square": "e2",
         "to_square": "e4",
+        "normalized": "e2e4",
     }
-    assert parse_algebraic_move("Nf3") == {
-        "piece_type": "knight",
-        "from_file": None,
-        "from_rank": None,
-        "is_capture": False,
-        "to_square": "f3",
-    }
-    assert parse_algebraic_move("exd5") == {
-        "piece_type": "pawn",
-        "from_file": "e",
-        "from_rank": None,
-        "is_capture": True,
-        "to_square": "d5",
+    assert parse_coordinate_move("E7E5") == {
+        "from_square": "e7",
+        "to_square": "e5",
+        "normalized": "e7e5",
     }
 
 
-def test_apply_algebraic_move_from_starting_position():
+def test_apply_coordinate_move_from_starting_position():
     board = Board()
 
-    piece, to_position = apply_algebraic_move(board, "white", "e4")
+    piece, to_position, normalized_move = apply_coordinate_move(board, "white", "e2e4")
     assert piece.__class__.__name__ == "Pawn"
     assert to_position == (4, 3)
+    assert normalized_move == "e2e4"
     assert board.get_piece_at((4, 1)) is None
     assert board.get_piece_at((4, 3)) == piece
 
 
-def test_apply_algebraic_move_rejects_illegal_move():
+def test_apply_coordinate_move_rejects_illegal_move():
     board = Board()
 
     try:
-        apply_algebraic_move(board, "white", "e5")
+        apply_coordinate_move(board, "white", "e2e5")
         assert False, "Expected illegal move error"
     except ValueError as error:
-        assert str(error) == "No legal piece can make that move"
+        assert str(error) == "Illegal move for that piece"
 
 
-def test_apply_algebraic_move_requires_capture_marker():
+def test_apply_coordinate_move_rejects_wrong_turn_piece():
+    board = Board()
+
+    try:
+        apply_coordinate_move(board, "white", "e7e5")
+        assert False, "Expected wrong-color error"
+    except ValueError as error:
+        assert str(error) == "Piece at e7 belongs to black"
+
+
+def test_apply_coordinate_move_allows_capture():
     board = _empty_board()
     _place(board, Pawn("white", (4, 3)))
     _place(board, Pawn("black", (3, 4)))
 
-    try:
-        apply_algebraic_move(board, "white", "d5")
-        assert False, "Expected capture marker error"
-    except ValueError as error:
-        assert str(error) == "Capture must include 'x' in algebraic notation"
-
-    piece, to_position = apply_algebraic_move(board, "white", "exd5")
+    piece, to_position, normalized_move = apply_coordinate_move(board, "white", "e4d5")
     assert piece.__class__.__name__ == "Pawn"
     assert to_position == (3, 4)
+    assert normalized_move == "e4d5"
 
 
 def test_savefile_records_moves():
@@ -176,10 +171,11 @@ def run_all_tests():
         test_position_move_counts,
         test_rook_path_obstruction_and_capture,
         test_pawn_forward_and_diagonal_captures,
-        test_parse_algebraic_move,
-        test_apply_algebraic_move_from_starting_position,
-        test_apply_algebraic_move_rejects_illegal_move,
-        test_apply_algebraic_move_requires_capture_marker,
+        test_parse_coordinate_move,
+        test_apply_coordinate_move_from_starting_position,
+        test_apply_coordinate_move_rejects_illegal_move,
+        test_apply_coordinate_move_rejects_wrong_turn_piece,
+        test_apply_coordinate_move_allows_capture,
         test_savefile_records_moves,
     ]
 

@@ -3,15 +3,6 @@ from datetime import datetime
 import os
 
 
-PIECE_SYMBOLS = {
-    "": "pawn",
-    "N": "knight",
-    "B": "bishop",
-    "R": "rook",
-    "Q": "queen",
-    "K": "king",
-}
-
 DEFAULT_SAVEFILE = "chess_save.txt"
 
 
@@ -31,34 +22,21 @@ def position_to_square(position):
     return f"{chr(ord('a') + col)}{row + 1}"
 
 
-def parse_algebraic_move(move_text):
+def parse_coordinate_move(move_text):
     text = move_text.strip()
     if not text:
         raise ValueError("Move cannot be empty")
 
-    normalized = text.replace("0", "O")
-    if normalized in {"O-O", "O-O-O"}:
-        raise ValueError("Castling is not supported yet")
-
-    normalized = re.sub(r"[+#?!]+$", "", normalized)
-    match = re.match(
-        r"^(?P<piece>[KQRBN])?(?P<from_file>[a-h])?(?P<from_rank>[1-8])?(?P<capture>x)?(?P<to>[a-h][1-8])(?P<promotion>=?[QRBN])?$",
-        normalized,
-    )
+    normalized = text.lower()
+    match = re.match(r"^(?P<from>[a-h][1-8])(?P<to>[a-h][1-8])$", normalized)
     if not match:
-        raise ValueError(f"Invalid algebraic move: {move_text}")
+        raise ValueError("Invalid move format. Use source and destination, for example: e2e4")
 
     groups = match.groupdict()
-    if groups["promotion"]:
-        raise ValueError("Promotion is not supported yet")
-
-    piece_type = PIECE_SYMBOLS[groups["piece"] or ""]
     return {
-        "piece_type": piece_type,
-        "from_file": groups["from_file"],
-        "from_rank": int(groups["from_rank"]) if groups["from_rank"] else None,
-        "is_capture": bool(groups["capture"]),
+        "from_square": groups["from"],
         "to_square": groups["to"],
+        "normalized": f"{groups['from']}{groups['to']}",
     }
 
 
@@ -242,47 +220,21 @@ class Board:
         return board_str
 
 
-def find_legal_move_candidates(board, color, parsed_move):
+def apply_coordinate_move(board, color, move_text):
+    parsed_move = parse_coordinate_move(move_text)
+    from_position = square_to_position(parsed_move["from_square"])
     to_position = square_to_position(parsed_move["to_square"])
-    expected_type = parsed_move["piece_type"]
 
-    from_file = parsed_move["from_file"]
-    from_rank = parsed_move["from_rank"]
+    piece = board.get_piece_at(from_position)
+    if piece is None:
+        raise ValueError(f"No piece at {parsed_move['from_square']}")
+    if piece.color != color:
+        raise ValueError(f"Piece at {parsed_move['from_square']} belongs to {piece.color}")
+    if to_position not in piece.get_legal_moves(board):
+        raise ValueError("Illegal move for that piece")
 
-    candidates = []
-    for piece in board.pieces:
-        if piece.color != color:
-            continue
-        if piece.__class__.__name__.lower() != expected_type:
-            continue
-        if from_file is not None and piece.position[0] != ord(from_file) - ord("a"):
-            continue
-        if from_rank is not None and piece.position[1] != from_rank - 1:
-            continue
-        if to_position in piece.get_legal_moves(board):
-            candidates.append(piece)
-
-    return candidates, to_position
-
-
-def apply_algebraic_move(board, color, move_text):
-    parsed_move = parse_algebraic_move(move_text)
-    candidates, to_position = find_legal_move_candidates(board, color, parsed_move)
-
-    target_piece = board.get_piece_at(to_position)
-    if parsed_move["is_capture"] and (target_piece is None or target_piece.color == color):
-        raise ValueError("Move indicates capture, but no capturable piece is on target square")
-    if not parsed_move["is_capture"] and target_piece is not None and target_piece.color != color:
-        raise ValueError("Capture must include 'x' in algebraic notation")
-
-    if not candidates:
-        raise ValueError("No legal piece can make that move")
-    if len(candidates) > 1:
-        raise ValueError("Ambiguous move: multiple pieces can make that move")
-
-    piece = candidates[0]
-    board.move_piece(piece.position, to_position)
-    return piece, to_position
+    board.move_piece(from_position, to_position)
+    return piece, to_position, parsed_move["normalized"]
 
 
 def has_legal_move(board, color):
@@ -298,7 +250,7 @@ def play_cli(savefile_path=DEFAULT_SAVEFILE):
     move_number = 1
     start_savefile(savefile_path)
 
-    print("Play chess with algebraic notation (examples: e4, Nf3, Bxe6).")
+    print("Play chess with source and destination notation (example: e2e4).")
     print("Type 'quit' to exit.")
     print(f"Saving moves to {savefile_path}")
 
@@ -315,8 +267,8 @@ def play_cli(savefile_path=DEFAULT_SAVEFILE):
             return
 
         try:
-            piece, to_position = apply_algebraic_move(board, current_turn, move_text)
-            record_move(savefile_path, move_number, current_turn, move_text)
+            piece, to_position, normalized_move = apply_coordinate_move(board, current_turn, move_text)
+            record_move(savefile_path, move_number, current_turn, normalized_move)
             move_number += 1
             print(f"Moved {piece.__class__.__name__} to {position_to_square(to_position)}")
             current_turn = "black" if current_turn == "white" else "white"
