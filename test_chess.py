@@ -1,5 +1,6 @@
 import tempfile
 import random
+from pathlib import Path
 
 from chess import (
     Board,
@@ -22,6 +23,7 @@ from chess import (
     record_move,
     start_savefile,
 )
+from run_tournament import build_fixtures, run_tournament
 
 
 def _empty_board():
@@ -395,6 +397,31 @@ def test_ai_profiles_and_minimax_selection():
     assert move_text == f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
 
 
+def test_tournament_fixture_counts():
+    profiles = get_ai_profiles()
+    assert len(build_fixtures(profiles, "ordered")) == 90
+    assert len(build_fixtures(profiles, "single")) == 45
+
+
+def test_tournament_writes_results_and_scoreboard():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        manifest, rows = run_tournament(
+            output_dir=temp_dir,
+            pairing_mode="ordered",
+            seed=7,
+            max_halfmoves=8,
+            max_matches=1,
+        )
+
+        output_root = Path(temp_dir)
+        assert manifest["match_count"] == 1
+        assert len(rows) == 10
+        assert (output_root / "scoreboard.csv").exists()
+        assert (output_root / "scoreboard.json").exists()
+        assert (output_root / "manifest.json").exists()
+        assert len(list((output_root / "matches").iterdir())) == 1
+
+
 def test_savefile_records_moves():
     with tempfile.TemporaryDirectory() as temp_dir:
         savefile_path = f"{temp_dir}/moves.log"
@@ -437,6 +464,8 @@ def run_all_tests():
         test_apply_random_ai_move_executes_selected_legal_move,
         test_apply_random_ai_move_fails_without_legal_moves,
         test_ai_profiles_and_minimax_selection,
+        test_tournament_fixture_counts,
+        test_tournament_writes_results_and_scoreboard,
         test_savefile_records_moves,
     ]
 
