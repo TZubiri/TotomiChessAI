@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import random
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -135,7 +136,39 @@ def write_scoreboard(output_root, rows):
         json.dump(rows, json_file, indent=2)
 
 
-def run_tournament(output_dir, pairing_mode, seed, max_halfmoves, max_matches=None):
+def _format_seconds(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _status_reason_label(status):
+    if status["state"] == "checkmate":
+        return f"checkmate ({status['winner']})"
+    if status["state"] == "draw":
+        return f"draw ({status['reason']})"
+    return status["state"]
+
+
+def _top_rows(scoreboard, max_score, count=3):
+    rows = sorted(
+        scoreboard.values(),
+        key=lambda row: (row["points"], row["raw_points"], row["wins"]),
+        reverse=True,
+    )
+    return [f"{index}. {row['name']} {row['points']:.2f}/{max_score}" for index, row in enumerate(rows[:count], start=1)]
+
+
+def run_tournament(
+    output_dir,
+    pairing_mode,
+    seed,
+    max_halfmoves,
+    max_matches=None,
+    status_every=10,
+    report_progress=True,
+):
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "matches").mkdir(parents=True, exist_ok=True)
@@ -159,7 +192,15 @@ def run_tournament(output_dir, pairing_mode, seed, max_halfmoves, max_matches=No
         for player in players
     }
 
+    total_matches = len(fixtures)
+    max_score = len(players) - 1
+
     rng = random.Random(seed)
+    start_time = time.time()
+    if report_progress:
+        print(f"Starting tournament with {len(players)} AIs and {total_matches} matches")
+        print(f"Seed={seed} pairing={pairing_mode} max_halfmoves={max_halfmoves}")
+
     for match_index, (white_profile, black_profile) in enumerate(fixtures, start=1):
         result = play_ai_match(white_profile, black_profile, rng, max_halfmoves)
         write_match_artifacts(output_root, match_index, white_profile, black_profile, result)
@@ -182,8 +223,28 @@ def run_tournament(output_dir, pairing_mode, seed, max_halfmoves, max_matches=No
             white_row["draws"] += 1
             black_row["draws"] += 1
 
+        if report_progress:
+            elapsed = time.time() - start_time
+            average = elapsed / match_index
+            eta_seconds = (total_matches - match_index) * average
+            result_label = _status_reason_label(result["status"])
+            print(
+                f"[{match_index:03d}/{total_matches:03d}] "
+                f"{white_profile['name']} vs {black_profile['name']} -> {result_label}, "
+                f"{result['plies_played']} plies, elapsed {_format_seconds(elapsed)}, "
+                f"eta {_format_seconds(eta_seconds)}"
+            )
+            if status_every > 0 and (match_index % status_every == 0 or match_index == total_matches):
+                max_games_so_far = max((entry["games"] for entry in scoreboard.values()), default=0)
+                scale = max_score / max_games_so_far if max_games_so_far else 0.0
+                for row in scoreboard.values():
+                    row["points"] = row["raw_points"] * scale
+                print("Current top 3:")
+                for line in _top_rows(scoreboard, max_score):
+                    print(f"  {line}")
+
     max_games = max((entry["games"] for entry in scoreboard.values()), default=0)
-    score_scale = (len(players) - 1) / max_games if max_games else 0.0
+    score_scale = max_score / max_games if max_games else 0.0
     for row in scoreboard.values():
         row["points"] = row["raw_points"] * score_scale
 
@@ -201,7 +262,7 @@ def run_tournament(output_dir, pairing_mode, seed, max_halfmoves, max_matches=No
         "player_count": len(players),
         "match_count": len(fixtures),
         "max_halfmoves": max_halfmoves,
-        "max_score": len(players) - 1,
+        "max_score": max_score,
         "notes": "points are normalized to max_score; raw_points retain standard scoring",
     }
     with open(output_root / "manifest.json", "w", encoding="utf-8") as manifest_file:
@@ -236,6 +297,17 @@ def parse_args():
         default=None,
         help="Optional cap for quick trial runs",
     )
+    parser.add_argument(
+        "--status-every",
+        type=int,
+        default=10,
+        help="Print standings snapshot every N matches",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Disable per-match status logging",
+    )
     return parser.parse_args()
 
 
@@ -247,6 +319,8 @@ def main():
         seed=args.seed,
         max_halfmoves=args.max_halfmoves,
         max_matches=args.max_matches,
+        status_every=args.status_every,
+        report_progress=not args.quiet,
     )
 
     print(f"Tournament complete: {manifest['match_count']} matches")

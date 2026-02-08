@@ -411,6 +411,7 @@ def test_tournament_writes_results_and_scoreboard():
             seed=7,
             max_halfmoves=8,
             max_matches=1,
+            report_progress=False,
         )
 
         output_root = Path(temp_dir)
