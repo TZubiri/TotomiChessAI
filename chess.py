@@ -1,4 +1,6 @@
 import re
+from datetime import datetime
+import os
 
 
 PIECE_SYMBOLS = {
@@ -9,6 +11,8 @@ PIECE_SYMBOLS = {
     "Q": "queen",
     "K": "king",
 }
+
+DEFAULT_SAVEFILE = "chess_save.txt"
 
 
 def square_to_position(square):
@@ -56,6 +60,20 @@ def parse_algebraic_move(move_text):
         "is_capture": bool(groups["capture"]),
         "to_square": groups["to"],
     }
+
+
+def start_savefile(savefile_path):
+    has_existing_content = os.path.exists(savefile_path) and os.path.getsize(savefile_path) > 0
+    with open(savefile_path, "a", encoding="utf-8") as savefile:
+        if has_existing_content:
+            savefile.write("\n")
+        started_at = datetime.now().isoformat(timespec="seconds")
+        savefile.write(f"=== Game started {started_at} ===\n")
+
+
+def record_move(savefile_path, move_number, color, move_text):
+    with open(savefile_path, "a", encoding="utf-8") as savefile:
+        savefile.write(f"{move_number}. {color} {move_text}\n")
 
 
 class Piece:
@@ -274,12 +292,15 @@ def has_legal_move(board, color):
     return False
 
 
-def play_cli():
+def play_cli(savefile_path=DEFAULT_SAVEFILE):
     board = Board()
     current_turn = "white"
+    move_number = 1
+    start_savefile(savefile_path)
 
     print("Play chess with algebraic notation (examples: e4, Nf3, Bxe6).")
     print("Type 'quit' to exit.")
+    print(f"Saving moves to {savefile_path}")
 
     while True:
         print()
@@ -295,6 +316,8 @@ def play_cli():
 
         try:
             piece, to_position = apply_algebraic_move(board, current_turn, move_text)
+            record_move(savefile_path, move_number, current_turn, move_text)
+            move_number += 1
             print(f"Moved {piece.__class__.__name__} to {position_to_square(to_position)}")
             current_turn = "black" if current_turn == "white" else "white"
         except ValueError as error:

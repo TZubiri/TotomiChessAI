@@ -1,4 +1,14 @@
-from chess import Board, Pawn, Rook, apply_algebraic_move, parse_algebraic_move
+import tempfile
+
+from chess import (
+    Board,
+    Pawn,
+    Rook,
+    apply_algebraic_move,
+    parse_algebraic_move,
+    record_move,
+    start_savefile,
+)
 
 
 def _empty_board():
@@ -144,6 +154,23 @@ def test_apply_algebraic_move_requires_capture_marker():
     assert to_position == (3, 4)
 
 
+def test_savefile_records_moves():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        savefile_path = f"{temp_dir}/moves.log"
+        start_savefile(savefile_path)
+        record_move(savefile_path, 1, "white", "e4")
+        record_move(savefile_path, 2, "black", "e5")
+
+        with open(savefile_path, "r", encoding="utf-8") as savefile:
+            lines = [line.rstrip("\n") for line in savefile]
+
+    assert len(lines) == 3
+    assert lines[0].startswith("=== Game started ")
+    assert lines[0].endswith(" ===")
+    assert lines[1] == "1. white e4"
+    assert lines[2] == "2. black e5"
+
+
 def run_all_tests():
     tests = [
         test_position_move_counts,
@@ -153,6 +180,7 @@ def run_all_tests():
         test_apply_algebraic_move_from_starting_position,
         test_apply_algebraic_move_rejects_illegal_move,
         test_apply_algebraic_move_requires_capture_marker,
+        test_savefile_records_moves,
     ]
 
     for test in tests:
