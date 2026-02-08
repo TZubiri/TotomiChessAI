@@ -1,6 +1,7 @@
 import re
 from datetime import datetime
 import os
+import copy
 
 
 DEFAULT_SAVEFILE = "chess_save.txt"
@@ -128,6 +129,8 @@ class Board:
         self.pieces = []
         self.en_passant_target = None
         self.en_passant_capture_position = None
+        self.halfmove_clock = 0
+        self.position_counts = {}
         self.setup_starting_position()
     
     def setup_starting_position(self):
@@ -136,6 +139,8 @@ class Board:
         self.pieces = []
         self.en_passant_target = None
         self.en_passant_capture_position = None
+        self.halfmove_clock = 0
+        self.position_counts = {}
         
         # White pieces
         self.add_piece('white', 'rook', (0, 0))
@@ -162,6 +167,8 @@ class Board:
         
         for col in range(8):
             self.add_piece('black', 'pawn', (col, 6))
+
+        self.record_position('white')
     
     def add_piece(self, color, piece_type, position):
         piece_classes = {
@@ -191,6 +198,106 @@ class Board:
 
     def get_opponent_color(self, color):
         return 'black' if color == 'white' else 'white'
+
+    def clone(self):
+        return copy.deepcopy(self)
+
+    def get_castling_rights(self):
+        rights = []
+
+        white_king = self.get_piece_at((4, 0))
+        if isinstance(white_king, King) and white_king.color == 'white' and not white_king.moved:
+            white_kingside_rook = self.get_piece_at((7, 0))
+            white_queenside_rook = self.get_piece_at((0, 0))
+            if isinstance(white_kingside_rook, Rook) and white_kingside_rook.color == 'white' and not white_kingside_rook.moved:
+                rights.append('K')
+            if isinstance(white_queenside_rook, Rook) and white_queenside_rook.color == 'white' and not white_queenside_rook.moved:
+                rights.append('Q')
+
+        black_king = self.get_piece_at((4, 7))
+        if isinstance(black_king, King) and black_king.color == 'black' and not black_king.moved:
+            black_kingside_rook = self.get_piece_at((7, 7))
+            black_queenside_rook = self.get_piece_at((0, 7))
+            if isinstance(black_kingside_rook, Rook) and black_kingside_rook.color == 'black' and not black_kingside_rook.moved:
+                rights.append('k')
+            if isinstance(black_queenside_rook, Rook) and black_queenside_rook.color == 'black' and not black_queenside_rook.moved:
+                rights.append('q')
+
+        return ''.join(rights) if rights else '-'
+
+    def get_en_passant_square_for_signature(self, active_color):
+        if self.en_passant_target is None:
+            return '-'
+
+        target_col, target_row = self.en_passant_target
+        direction = 1 if active_color == 'white' else -1
+        source_row = target_row - direction
+
+        for source_col in (target_col - 1, target_col + 1):
+            source_position = (source_col, source_row)
+            if not self.is_valid_position(source_position):
+                continue
+            piece = self.get_piece_at(source_position)
+            if isinstance(piece, Pawn) and piece.color == active_color:
+                if self.en_passant_target in piece.get_legal_moves(self):
+                    return position_to_square(self.en_passant_target)
+
+        return '-'
+
+    def get_position_signature(self, active_color):
+        pieces_state = tuple(
+            sorted((piece.symbol, piece.position[0], piece.position[1]) for piece in self.pieces)
+        )
+        return (
+            pieces_state,
+            active_color,
+            self.get_castling_rights(),
+            self.get_en_passant_square_for_signature(active_color),
+        )
+
+    def record_position(self, active_color):
+        signature = self.get_position_signature(active_color)
+        self.position_counts[signature] = self.position_counts.get(signature, 0) + 1
+
+    def is_threefold_repetition(self, active_color):
+        signature = self.get_position_signature(active_color)
+        return self.position_counts.get(signature, 0) >= 3
+
+    def is_fifty_move_draw(self):
+        return self.halfmove_clock >= 100
+
+    def find_king_position(self, color):
+        for piece in self.pieces:
+            if isinstance(piece, King) and piece.color == color:
+                return piece.position
+        return None
+
+    def is_in_check(self, color):
+        king_position = self.find_king_position(color)
+        if king_position is None:
+            return False
+        return self.is_square_attacked(king_position, self.get_opponent_color(color))
+
+    def is_legal_move(self, color, from_pos, to_pos):
+        piece = self.get_piece_at(from_pos)
+        if piece is None or piece.color != color:
+            return False
+        if to_pos not in piece.get_legal_moves(self):
+            return False
+
+        simulation = self.clone()
+        simulation.move_piece(from_pos, to_pos, update_tracking=False)
+        return not simulation.is_in_check(color)
+
+    def has_legal_move(self, color):
+        for piece in self.pieces:
+            if piece.color != color:
+                continue
+            from_pos = piece.position
+            for to_pos in piece.get_legal_moves(self):
+                if self.is_legal_move(color, from_pos, to_pos):
+                    return True
+        return False
 
     def _sliding_piece_attacks_square(self, piece, target_position, directions):
         for col_step, row_step in directions:
@@ -311,7 +418,7 @@ class Board:
                 self.pieces.remove(piece)
             self.board[row][col] = None
     
-    def move_piece(self, from_pos, to_pos):
+    def move_piece(self, from_pos, to_pos, update_tracking=True):
         piece = self.get_piece_at(from_pos)
         if not piece:
             return False
@@ -327,6 +434,8 @@ class Board:
             and self.en_passant_target == to_pos
             and self.en_passant_capture_position is not None
         )
+
+        is_capture = target_piece is not None or is_en_passant_capture
 
         if is_en_passant_capture:
             self.remove_piece_at(self.en_passant_capture_position)
@@ -359,6 +468,15 @@ class Board:
         if isinstance(piece, Pawn) and abs(to_row - from_row) == 2:
             self.en_passant_target = (from_col, (from_row + to_row) // 2)
             self.en_passant_capture_position = (to_col, to_row)
+
+        if update_tracking:
+            if isinstance(piece, Pawn) or is_capture:
+                self.halfmove_clock = 0
+            else:
+                self.halfmove_clock += 1
+
+            next_color = self.get_opponent_color(piece.color)
+            self.record_position(next_color)
 
         return True
     
