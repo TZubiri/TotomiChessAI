@@ -1,12 +1,24 @@
 import tempfile
+import random
 
 from chess import (
     Board,
     King,
     Pawn,
+    Queen,
     Rook,
+    apply_algebraic_move,
+    apply_ai_move,
     apply_coordinate_move,
+    apply_random_ai_move,
+    apply_user_move,
+    choose_ai_move,
+    choose_random_legal_move,
+    get_ai_profiles,
+    get_game_status,
+    parse_algebraic_move,
     parse_coordinate_move,
+    position_to_square,
     record_move,
     start_savefile,
 )
@@ -16,6 +28,10 @@ def _empty_board():
     board = Board()
     board.board = [[None for _ in range(8)] for _ in range(8)]
     board.pieces = []
+    board.en_passant_target = None
+    board.en_passant_capture_position = None
+    board.halfmove_clock = 0
+    board.position_counts = {}
     return board
 
 
@@ -117,6 +133,32 @@ def test_parse_coordinate_move():
     }
 
 
+def test_parse_algebraic_move():
+    assert parse_algebraic_move("e4") == {
+        "kind": "piece_move",
+        "piece_type": "pawn",
+        "from_file": None,
+        "from_rank": None,
+        "is_capture": False,
+        "to_square": "e4",
+        "normalized": "e4",
+    }
+    assert parse_algebraic_move("Nf3") == {
+        "kind": "piece_move",
+        "piece_type": "knight",
+        "from_file": None,
+        "from_rank": None,
+        "is_capture": False,
+        "to_square": "f3",
+        "normalized": "Nf3",
+    }
+    assert parse_algebraic_move("O-O") == {
+        "kind": "castle",
+        "side": "kingside",
+        "normalized": "O-O",
+    }
+
+
 def test_apply_coordinate_move_from_starting_position():
     board = Board()
 
@@ -126,6 +168,29 @@ def test_apply_coordinate_move_from_starting_position():
     assert normalized_move == "e2e4"
     assert board.get_piece_at((4, 1)) is None
     assert board.get_piece_at((4, 3)) == piece
+
+
+def test_apply_algebraic_move_from_starting_position():
+    board = Board()
+
+    piece, to_position, normalized_move = apply_algebraic_move(board, "white", "e4")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (4, 3)
+    assert normalized_move == "e4"
+
+
+def test_apply_user_move_supports_both_notations():
+    board = Board()
+
+    piece, to_position, normalized_move = apply_user_move(board, "white", "e2e4")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (4, 3)
+    assert normalized_move == "e2e4"
+
+    piece, to_position, normalized_move = apply_user_move(board, "black", "e5")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (4, 4)
+    assert normalized_move == "e5"
 
 
 def test_apply_coordinate_move_rejects_illegal_move():
@@ -243,6 +308,93 @@ def test_castling_rejected_when_path_square_is_attacked():
         assert str(error) == "Illegal move for that piece"
 
 
+def test_threefold_repetition_draw_status():
+    board, current_turn = _replay_moves(
+        [
+            "g1f3",
+            "g8f6",
+            "f3g1",
+            "f6g8",
+            "g1f3",
+            "g8f6",
+            "f3g1",
+            "f6g8",
+        ]
+    )
+    assert current_turn == "white"
+
+    status = get_game_status(board, current_turn)
+    assert status == {"state": "draw", "reason": "threefold_repetition", "winner": None}
+
+
+def test_fifty_move_rule_draw_status():
+    board = Board()
+    board.halfmove_clock = 100
+
+    status = get_game_status(board, "white")
+    assert status == {"state": "draw", "reason": "fifty_move_rule", "winner": None}
+
+
+def test_stalemate_draw_status():
+    board = _empty_board()
+    _place(board, King("black", (0, 7)))
+    _place(board, King("white", (2, 5)))
+    _place(board, Queen("white", (2, 6)))
+
+    status = get_game_status(board, "black")
+    assert status == {"state": "draw", "reason": "stalemate", "winner": None}
+
+
+def test_choose_random_legal_move_returns_legal_move():
+    board = Board()
+    legal_moves = set(board.get_legal_moves_for_color("white"))
+
+    move = choose_random_legal_move(board, "white", rng=random.Random(7))
+    assert move is not None
+    assert move in legal_moves
+
+
+def test_apply_random_ai_move_executes_selected_legal_move():
+    board = Board()
+    legal_moves = set(board.get_legal_moves_for_color("white"))
+
+    piece, from_pos, to_pos, move_text = apply_random_ai_move(board, "white", rng=random.Random(11))
+
+    assert (from_pos, to_pos) in legal_moves
+    assert board.get_piece_at(from_pos) is None
+    assert board.get_piece_at(to_pos) == piece
+    assert move_text == f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
+
+
+def test_apply_random_ai_move_fails_without_legal_moves():
+    board = _empty_board()
+    _place(board, King("black", (7, 7)))
+
+    assert choose_random_legal_move(board, "white", rng=random.Random(1)) is None
+    try:
+        apply_random_ai_move(board, "white", rng=random.Random(1))
+        assert False, "Expected no-legal-moves error"
+    except ValueError as error:
+        assert str(error) == "No legal moves available for white"
+
+
+def test_ai_profiles_and_minimax_selection():
+    profiles = get_ai_profiles()
+    assert len(profiles) == 12
+    assert any(profile["plies"] == 0 for profile in profiles)
+    assert any(profile["plies"] == 3 for profile in profiles)
+
+    board = Board()
+    oracle_profile = next(profile for profile in profiles if profile["plies"] == 3 and profile["personality_name"] == "Classic")
+    move = choose_ai_move(board, "white", oracle_profile, rng=random.Random(3))
+    assert move is not None
+
+    piece, from_pos, to_pos, move_text = apply_ai_move(board, "white", oracle_profile, rng=random.Random(3))
+    assert board.get_piece_at(from_pos) is None
+    assert board.get_piece_at(to_pos) == piece
+    assert move_text == f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
+
+
 def test_savefile_records_moves():
     with tempfile.TemporaryDirectory() as temp_dir:
         savefile_path = f"{temp_dir}/moves.log"
@@ -266,7 +418,10 @@ def run_all_tests():
         test_rook_path_obstruction_and_capture,
         test_pawn_forward_and_diagonal_captures,
         test_parse_coordinate_move,
+        test_parse_algebraic_move,
         test_apply_coordinate_move_from_starting_position,
+        test_apply_algebraic_move_from_starting_position,
+        test_apply_user_move_supports_both_notations,
         test_apply_coordinate_move_rejects_illegal_move,
         test_apply_coordinate_move_rejects_wrong_turn_piece,
         test_apply_coordinate_move_allows_capture,
@@ -275,6 +430,13 @@ def run_all_tests():
         test_en_passant_expires_after_one_turn,
         test_castling_kingside_and_queenside,
         test_castling_rejected_when_path_square_is_attacked,
+        test_threefold_repetition_draw_status,
+        test_fifty_move_rule_draw_status,
+        test_stalemate_draw_status,
+        test_choose_random_legal_move_returns_legal_move,
+        test_apply_random_ai_move_executes_selected_legal_move,
+        test_apply_random_ai_move_fails_without_legal_moves,
+        test_ai_profiles_and_minimax_selection,
         test_savefile_records_moves,
     ]
 
