@@ -32,10 +32,9 @@ class Knight(Piece):
         for col_offset, row_offset in knight_moves:
             new_col = col + col_offset
             new_row = row + row_offset
-            new_position = (new_col, new_row)
             
-            if self.is_valid_position(new_position):
-                moves.append(new_position)
+            if board.is_valid_position((new_col, new_row)):
+                moves.append((new_col, new_row))
         
         return moves
 
