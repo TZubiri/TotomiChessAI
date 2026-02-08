@@ -1,6 +1,7 @@
 import tempfile
 import random
 from pathlib import Path
+import builtins
 
 from chess import (
     Board,
@@ -17,9 +18,11 @@ from chess import (
     apply_user_move,
     choose_ai_move,
     choose_random_legal_move,
+    configure_game_menu,
     evaluate_material,
     get_ai_profiles,
     get_game_status,
+    play_match,
     parse_algebraic_move,
     parse_coordinate_move,
     position_to_square,
@@ -54,6 +57,20 @@ def _replay_moves(moves):
         apply_coordinate_move(board, current_turn, move)
         current_turn = "black" if current_turn == "white" else "white"
     return board, current_turn
+
+
+def _with_mocked_input(responses, func, *args, **kwargs):
+    original_input = builtins.input
+    pending = iter(responses)
+
+    def fake_input(_prompt=""):
+        return next(pending)
+
+    builtins.input = fake_input
+    try:
+        return func(*args, **kwargs)
+    finally:
+        builtins.input = original_input
 
 
 def _move_counts_by_position(board):
@@ -444,6 +461,36 @@ def test_ai_profiles_and_minimax_selection():
     assert move_text == f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
 
 
+def test_configure_game_menu_ai_vs_ai_mode():
+    setup = _with_mocked_input(["3", "1", "2"], configure_game_menu, random.Random(0))
+    assert setup["mode"] == "ai_vs_ai"
+    white_profile = setup["white_ai_profile"]
+    black_profile = setup["black_ai_profile"]
+    assert isinstance(white_profile, dict)
+    assert isinstance(black_profile, dict)
+    assert white_profile.get("id") == "d0_random"
+    assert black_profile.get("id") != ""
+
+
+def test_configure_game_menu_quit_option():
+    setup = _with_mocked_input(["q"], configure_game_menu, random.Random(0))
+    assert setup == {"mode": "quit"}
+
+
+def test_play_match_ai_vs_ai_returns_terminal_status():
+    profiles = get_ai_profiles()
+    setup = {
+        "mode": "ai_vs_ai",
+        "white_ai_profile": profiles[0],
+        "black_ai_profile": profiles[0],
+    }
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        status = play_match(setup, savefile_path=f"{temp_dir}/match.log")
+
+    assert status["state"] in {"king_capture", "draw"}
+
+
 def test_pawnwise_profile_heuristics_affect_evaluation():
     board = _empty_board()
     _place(board, Pawn("white", (4, 4)))
@@ -570,6 +617,9 @@ def run_all_tests():
         test_apply_random_ai_move_executes_selected_legal_move,
         test_apply_random_ai_move_fails_without_legal_moves,
         test_ai_profiles_and_minimax_selection,
+        test_configure_game_menu_ai_vs_ai_mode,
+        test_configure_game_menu_quit_option,
+        test_play_match_ai_vs_ai_returns_terminal_status,
         test_pawnwise_profile_heuristics_affect_evaluation,
         test_pawnwise_control_profile_drawish_opposite_bishops,
         test_tournament_fixture_counts,

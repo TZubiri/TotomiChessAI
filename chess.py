@@ -1240,18 +1240,32 @@ def apply_random_ai_move(board, color, rng=None):
     return apply_ai_move(board, color, RANDOM_AI_PROFILE, rng=rng)
 
 
-def choose_menu_option(options, prompt_text, default_index=0):
+def choose_menu_option(options, prompt_text, default_index=0, allow_quit=False):
     for index, option in enumerate(options, start=1):
         print(f"{index}. {option}")
     raw_value = input(prompt_text).strip()
+    if allow_quit and raw_value.lower() in {"q", "quit", "exit"}:
+        return None
     if not raw_value:
         return default_index
     if raw_value.isdigit():
         selected = int(raw_value) - 1
         if 0 <= selected < len(options):
             return selected
-    print("Invalid choice, using default.")
+    if allow_quit:
+        print("Invalid choice, using default (or type q to quit).")
+    else:
+        print("Invalid choice, using default.")
     return default_index
+
+
+def choose_ai_profile(profiles, prompt_text, default_index=0):
+    profile_options = [
+        f"{profile['name']} ({profile['plies']} plies, {profile['personality_name']})"
+        for profile in profiles
+    ]
+    profile_index = choose_menu_option(profile_options, prompt_text, default_index=default_index)
+    return profiles[profile_index]
 
 
 def configure_game_menu(rng=None):
@@ -1259,60 +1273,86 @@ def configure_game_menu(rng=None):
 
     print("=== Chess Menu ===")
     mode_index = choose_menu_option(
-        ["Self play", "Play versus AI"],
-        "Select mode [1]: ",
+        ["Self play", "Play versus AI", "AI versus AI", "Quit"],
+        "Select mode [1] (or q): ",
         default_index=0,
+        allow_quit=True,
     )
+    if mode_index is None or mode_index == 3:
+        return {"mode": "quit"}
+
     if mode_index == 0:
         return {"mode": "self_play", "ai_profile": None, "ai_color": None}
 
     profiles = get_ai_profiles()
-    profile_options = [
-        f"{profile['name']} ({profile['plies']} plies, {profile['personality_name']})"
-        for profile in profiles
-    ]
-    profile_index = choose_menu_option(profile_options, "Select AI [1]: ", default_index=0)
-    selected_profile = profiles[profile_index]
+    if mode_index == 1:
+        selected_profile = choose_ai_profile(profiles, "Select AI [1]: ", default_index=0)
 
-    color_input = input("Choose your color ([R]andom/[W]hite/[B]lack, default random): ").strip().lower()
-    if color_input == "w":
-        human_color = "white"
-    elif color_input == "b":
-        human_color = "black"
-    else:
-        human_color = random_source.choice(["white", "black"])
+        color_input = input("Choose your color ([R]andom/[W]hite/[B]lack, default random): ").strip().lower()
+        if color_input == "w":
+            human_color = "white"
+        elif color_input == "b":
+            human_color = "black"
+        else:
+            human_color = random_source.choice(["white", "black"])
 
-    ai_color = "black" if human_color == "white" else "white"
-    print(f"You are {human_color}. AI is {selected_profile['name']} ({ai_color}).")
+        ai_color = "black" if human_color == "white" else "white"
+        print(f"You are {human_color}. AI is {selected_profile['name']} ({ai_color}).")
+        return {
+            "mode": "vs_ai",
+            "ai_profile": selected_profile,
+            "ai_color": ai_color,
+        }
+
+    white_profile = choose_ai_profile(profiles, "Select white AI [1]: ", default_index=0)
+    black_profile = choose_ai_profile(profiles, "Select black AI [1]: ", default_index=0)
+    print(f"AI match: {white_profile['name']} (white) vs {black_profile['name']} (black)")
     return {
-        "mode": "vs_ai",
-        "ai_profile": selected_profile,
-        "ai_color": ai_color,
+        "mode": "ai_vs_ai",
+        "white_ai_profile": white_profile,
+        "black_ai_profile": black_profile,
     }
 
 
-def play_cli(savefile_path=DEFAULT_SAVEFILE):
+def _match_result_message(status):
+    if status["winner"] is not None:
+        return f"King captured. {status['winner'].capitalize()} wins."
+    if status["state"] == "draw":
+        return f"Draw by {status['reason'].replace('_', ' ')}."
+    return "Match ended."
+
+def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE):
     board = Board()
     current_turn = "white"
     move_number = 1
-    game_setup = configure_game_menu()
     start_savefile(savefile_path)
 
-    print("Play chess with coordinate or algebraic notation (e2e4, e7e8q, e4, Nf3, O-O, e8=Q).")
-    print("Type 'ai' to let a random AI move for the current side.")
-    print("Type 'quit' to exit.")
-    print(f"Saving moves to {savefile_path}")
+    fast_mode = game_setup["mode"] == "ai_vs_ai"
+    if not fast_mode:
+        print("Play chess with coordinate or algebraic notation (e2e4, e7e8q, e4, Nf3, O-O, e8=Q).")
+        print("Type 'ai' to let a random AI move for the current side.")
+        print("Type 'quit' to exit to menu.")
+        print(f"Saving moves to {savefile_path}")
 
     while True:
-        print()
-        print(board)
+        if not fast_mode:
+            print()
+            print(board)
         status = get_game_status(board, current_turn)
-        if status["winner"] is not None:
-            print(f"King captured. {status['winner'].capitalize()} wins.")
-            return
-        if status["state"] == "draw":
-            print(f"Draw by {status['reason'].replace('_', ' ')}.")
-            return
+        if status["winner"] is not None or status["state"] == "draw":
+            if fast_mode:
+                print(_match_result_message(status))
+            else:
+                print(_match_result_message(status))
+            return status
+
+        if game_setup["mode"] == "ai_vs_ai":
+            ai_profile = game_setup[f"{current_turn}_ai_profile"]
+            piece, _, to_position, normalized_move = apply_ai_move(board, current_turn, ai_profile)
+            record_move(savefile_path, move_number, current_turn, normalized_move)
+            move_number += 1
+            current_turn = board.get_opponent_color(current_turn)
+            continue
 
         if game_setup["mode"] == "vs_ai" and current_turn == game_setup["ai_color"]:
             piece, _, to_position, normalized_move = apply_ai_move(board, current_turn, game_setup["ai_profile"])
@@ -1324,8 +1364,8 @@ def play_cli(savefile_path=DEFAULT_SAVEFILE):
 
         move_text = input(f"{current_turn}> ").strip()
         if move_text.lower() in {"quit", "exit"}:
-            print("Goodbye")
-            return
+            print("Returning to menu")
+            return {"state": "aborted", "reason": "quit", "winner": None}
 
         if move_text.lower() == "ai":
             try:
@@ -1346,6 +1386,17 @@ def play_cli(savefile_path=DEFAULT_SAVEFILE):
             current_turn = board.get_opponent_color(current_turn)
         except ValueError as error:
             print(f"Illegal move: {error}")
+
+
+def play_cli(savefile_path=DEFAULT_SAVEFILE):
+    while True:
+        game_setup = configure_game_menu()
+        if game_setup["mode"] == "quit":
+            print("Goodbye")
+            return
+
+        play_match(game_setup, savefile_path=savefile_path)
+        print("Returning to main menu.")
 
 class Pawn(Piece):
     def __init__(self, color, position):
