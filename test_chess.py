@@ -25,6 +25,15 @@ def _place(board, piece):
     return piece
 
 
+def _replay_moves(moves):
+    board = Board()
+    current_turn = "white"
+    for move in moves:
+        apply_coordinate_move(board, current_turn, move)
+        current_turn = "black" if current_turn == "white" else "white"
+    return board, current_turn
+
+
 def _move_counts_by_position(board):
     return {piece.position: len(piece.get_legal_moves(board)) for piece in board.pieces}
 
@@ -149,6 +158,30 @@ def test_apply_coordinate_move_allows_capture():
     assert normalized_move == "e4d5"
 
 
+def test_last_game_scenario_attempted_moves():
+    opening_moves = ["e2e4", "e7e5", "d2d4", "f7f5"]
+
+    board, current_turn = _replay_moves(opening_moves)
+    assert current_turn == "white"
+    piece, to_position, normalized_move = apply_coordinate_move(board, "white", "d4d5")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (3, 4)
+    assert normalized_move == "d4d5"
+
+    board, current_turn = _replay_moves(opening_moves)
+    assert current_turn == "white"
+    try:
+        apply_coordinate_move(board, "white", "e4xf5")
+        assert False, "Expected coordinate-format error"
+    except ValueError as error:
+        assert str(error) == "Invalid move format. Use source and destination, for example: e2e4"
+
+    piece, to_position, normalized_move = apply_coordinate_move(board, "white", "e4f5")
+    assert piece.__class__.__name__ == "Pawn"
+    assert to_position == (5, 4)
+    assert normalized_move == "e4f5"
+
+
 def test_savefile_records_moves():
     with tempfile.TemporaryDirectory() as temp_dir:
         savefile_path = f"{temp_dir}/moves.log"
@@ -176,6 +209,7 @@ def run_all_tests():
         test_apply_coordinate_move_rejects_illegal_move,
         test_apply_coordinate_move_rejects_wrong_turn_piece,
         test_apply_coordinate_move_allows_capture,
+        test_last_game_scenario_attempted_moves,
         test_savefile_records_moves,
     ]
 

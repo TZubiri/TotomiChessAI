@@ -189,7 +189,8 @@ class Board:
         col, row = position
         piece = self.board[row][col]
         if piece:
-            self.pieces.remove(piece)
+            if piece in self.pieces:
+                self.pieces.remove(piece)
             self.board[row][col] = None
     
     def move_piece(self, from_pos, to_pos):
@@ -199,7 +200,7 @@ class Board:
         target_piece = self.get_piece_at(to_pos)
         if target_piece is not None:
             self.remove_piece_at(to_pos)
-        self.remove_piece_at(from_pos)
+        self.board[from_pos[1]][from_pos[0]] = None
         self.board[to_pos[1]][to_pos[0]] = piece
         piece.position = to_pos
         piece.moved = True
