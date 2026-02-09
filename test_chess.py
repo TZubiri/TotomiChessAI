@@ -4,6 +4,8 @@ from pathlib import Path
 import builtins
 
 from chess import (
+    _evaluate_position_scores_c_base,
+    _evaluate_position_scores_python_base,
     Board,
     Bishop,
     King,
@@ -19,6 +21,7 @@ from chess import (
     choose_ai_move,
     choose_minimax_legal_move,
     choose_random_legal_move,
+    c_evaluator_available,
     convert_legacy_save_text_to_pgn,
     configure_game_menu,
     evaluate_material,
@@ -744,6 +747,36 @@ def test_move_text_to_algebraic_uses_pawn_file_on_capture():
     assert move_text_to_algebraic(board, "white", "e4f5") == "exf5"
 
 
+def test_c_piece_evaluation_matches_python_when_available():
+    if not c_evaluator_available():
+        return
+
+    board, _ = _replay_moves(["e2e4", "d7d5", "e4d5", "g8f6", "d2d4", "f6d5"])
+    profiles = get_ai_profiles()
+    profile = next(profile for profile in profiles if profile["id"] == "d2_pawnwise_control")
+
+    python_scores = _evaluate_position_scores_python_base(
+        board,
+        "white",
+        profile["piece_values"],
+        pawn_rank_values=profile.get("pawn_rank_values"),
+        backward_pawn_value=profile.get("backward_pawn_value"),
+        position_multipliers=profile.get("position_multipliers"),
+    )
+    c_scores = _evaluate_position_scores_c_base(
+        board,
+        "white",
+        profile["piece_values"],
+        pawn_rank_values=profile.get("pawn_rank_values"),
+        backward_pawn_value=profile.get("backward_pawn_value"),
+        position_multipliers=profile.get("position_multipliers"),
+    )
+
+    assert c_scores is not None
+    assert abs(c_scores[0] - python_scores[0]) < 1e-9
+    assert abs(c_scores[1] - python_scores[1]) < 1e-9
+
+
 def run_all_tests():
     tests = [
         test_position_move_counts,
@@ -788,6 +821,7 @@ def run_all_tests():
         test_move_text_to_algebraic_disambiguates_rook_by_rank,
         test_move_text_to_algebraic_disambiguates_queen_by_file_and_rank,
         test_move_text_to_algebraic_uses_pawn_file_on_capture,
+        test_c_piece_evaluation_matches_python_when_available,
     ]
 
     for test in tests:

@@ -3,6 +3,8 @@ from datetime import datetime
 import os
 import copy
 import random
+import ctypes
+import subprocess
 
 
 DEFAULT_SAVEFILE = "chess_save.pgn"
@@ -14,6 +16,13 @@ PIECE_TYPE_BY_CLASS = {
     "Queen": "queen",
     "King": "king",
 }
+PIECE_ORDER = ["pawn", "knight", "bishop", "rook", "queen", "king"]
+PIECE_INDEX_BY_TYPE = {piece_type: index for index, piece_type in enumerate(PIECE_ORDER)}
+C_EVAL_SOURCE = os.path.join(os.path.dirname(__file__), "ai_eval.c")
+C_EVAL_LIBRARY = os.path.join(os.path.dirname(__file__), "ai_eval.so")
+_C_EVAL_FUNCTION = None
+_C_EVAL_ATTEMPTED = False
+_C_EVAL_LIBRARY_HANDLE = None
 
 AI_PERSONALITIES = [
     {
@@ -388,6 +397,154 @@ def get_ai_profiles():
             )
     profiles.extend(SPECIAL_AI_PROFILES)
     return profiles
+
+
+def _load_c_eval_function():
+    global _C_EVAL_ATTEMPTED
+    global _C_EVAL_FUNCTION
+    global _C_EVAL_LIBRARY_HANDLE
+
+    if _C_EVAL_ATTEMPTED:
+        return _C_EVAL_FUNCTION
+
+    _C_EVAL_ATTEMPTED = True
+    if not os.path.exists(C_EVAL_SOURCE):
+        return None
+
+    needs_build = (
+        not os.path.exists(C_EVAL_LIBRARY)
+        or os.path.getmtime(C_EVAL_LIBRARY) < os.path.getmtime(C_EVAL_SOURCE)
+    )
+    if needs_build:
+        try:
+            subprocess.run(
+                ["gcc", "-O3", "-shared", "-fPIC", C_EVAL_SOURCE, "-o", C_EVAL_LIBRARY],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+
+    try:
+        _C_EVAL_LIBRARY_HANDLE = ctypes.CDLL(C_EVAL_LIBRARY)
+    except OSError:
+        return None
+
+    evaluate_function = _C_EVAL_LIBRARY_HANDLE.evaluate_piece_components_c
+    evaluate_function.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int,
+        ctypes.c_double,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    evaluate_function.restype = ctypes.c_int
+    _C_EVAL_FUNCTION = evaluate_function
+    return _C_EVAL_FUNCTION
+
+
+def c_evaluator_available():
+    return _load_c_eval_function() is not None
+
+
+def _evaluate_position_scores_c_base(
+    board,
+    perspective_color,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+):
+    evaluate_function = _load_c_eval_function()
+    if evaluate_function is None:
+        return None
+
+    if not board.pieces:
+        return 0.0, 0.0
+
+    piece_types = []
+    piece_colors = []
+    piece_cols = []
+    piece_rows = []
+    for piece in board.pieces:
+        piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
+        piece_types.append(PIECE_INDEX_BY_TYPE[piece_type])
+        piece_colors.append(0 if piece.color == "white" else 1)
+        piece_cols.append(piece.position[0])
+        piece_rows.append(piece.position[1])
+
+    piece_count = len(piece_types)
+    piece_type_array = (ctypes.c_int * piece_count)(*piece_types)
+    piece_color_array = (ctypes.c_int * piece_count)(*piece_colors)
+    piece_col_array = (ctypes.c_int * piece_count)(*piece_cols)
+    piece_row_array = (ctypes.c_int * piece_count)(*piece_rows)
+
+    ordered_piece_values = [float(piece_values[piece_type]) for piece_type in PIECE_ORDER]
+    piece_value_array = (ctypes.c_double * len(PIECE_ORDER))(*ordered_piece_values)
+
+    has_pawn_rank_values = 1 if pawn_rank_values else 0
+    if pawn_rank_values:
+        pawn_base_value = float(piece_values["pawn"])
+        pawn_rank_entries = [0.0] + [float(pawn_rank_values.get(rank, pawn_base_value)) for rank in range(1, 9)]
+    else:
+        pawn_rank_entries = [0.0] * 9
+    pawn_rank_array = (ctypes.c_double * 9)(*pawn_rank_entries)
+
+    has_backward_pawn_value = 1 if backward_pawn_value is not None else 0
+    backward_pawn_entry = float(backward_pawn_value) if backward_pawn_value is not None else 0.0
+
+    has_position_multipliers = 1 if position_multipliers else 0
+    if position_multipliers:
+        corner_value = float(position_multipliers.get("corner", 1.0))
+        corner_touch_value = float(position_multipliers.get("corner_touch", 1.0))
+        position_entries = [
+            float(position_multipliers.get("center", 1.0)),
+            float(position_multipliers.get("center_cross", 1.0)),
+            float(position_multipliers.get("center_diagonal", 1.0)),
+            corner_value,
+            float(position_multipliers.get("corner_rook", corner_value)),
+            corner_touch_value,
+            float(position_multipliers.get("corner_touch_rook", corner_touch_value)),
+        ]
+    else:
+        position_entries = [1.0] * 7
+    position_array = (ctypes.c_double * 7)(*position_entries)
+
+    material_score = ctypes.c_double()
+    heuristic_score = ctypes.c_double()
+    perspective_color_index = 0 if perspective_color == "white" else 1
+    success = evaluate_function(
+        piece_type_array,
+        piece_color_array,
+        piece_col_array,
+        piece_row_array,
+        piece_count,
+        perspective_color_index,
+        piece_value_array,
+        pawn_rank_array,
+        has_pawn_rank_values,
+        backward_pawn_entry,
+        has_backward_pawn_value,
+        position_array,
+        has_position_multipliers,
+        ctypes.byref(material_score),
+        ctypes.byref(heuristic_score),
+    )
+    if success != 1:
+        return None
+
+    return material_score.value, heuristic_score.value
 
 
 def _status_to_pgn_result(status):
@@ -1214,15 +1371,14 @@ def _evaluate_piece_scores(
     heuristic_score = piece_score - material_score
     return material_score, heuristic_score
 
-def evaluate_position_scores(
+
+def _evaluate_position_scores_python_base(
     board,
     perspective_color,
     piece_values,
     pawn_rank_values=None,
     backward_pawn_value=None,
     position_multipliers=None,
-    control_weight=0.0,
-    opposite_bishop_draw_factor=None,
 ):
     material_score = 0.0
     heuristic_score = 0.0
@@ -1241,6 +1397,39 @@ def evaluate_position_scores(
         else:
             material_score -= piece_material
             heuristic_score -= piece_heuristic
+
+    return material_score, heuristic_score
+
+
+def evaluate_position_scores(
+    board,
+    perspective_color,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+):
+    c_scores = _evaluate_position_scores_c_base(
+        board,
+        perspective_color,
+        piece_values,
+        pawn_rank_values=pawn_rank_values,
+        backward_pawn_value=backward_pawn_value,
+        position_multipliers=position_multipliers,
+    )
+    if c_scores is None:
+        material_score, heuristic_score = _evaluate_position_scores_python_base(
+            board,
+            perspective_color,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+        )
+    else:
+        material_score, heuristic_score = c_scores
 
     if control_weight:
         heuristic_score += control_weight * _control_score(

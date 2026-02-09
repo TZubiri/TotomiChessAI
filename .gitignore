@@ -5,3 +5,4 @@ chess_save.pgn
 tournament_results/
 game.txt
 game.pgn
+ai_eval.so
