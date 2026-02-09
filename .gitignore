@@ -3,3 +3,4 @@ __pycache__/
 chess_save.txt
 chess_save.pgn
 tournament_results/
+game.txt

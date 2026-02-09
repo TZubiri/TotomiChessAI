@@ -228,6 +228,121 @@ def parse_algebraic_move(move_text):
     }
 
 
+def _piece_letter_for_algebraic(piece):
+    if isinstance(piece, Knight):
+        return "N"
+    if isinstance(piece, Bishop):
+        return "B"
+    if isinstance(piece, Rook):
+        return "R"
+    if isinstance(piece, Queen):
+        return "Q"
+    if isinstance(piece, King):
+        return "K"
+    return ""
+
+
+def _resolve_coordinate_move_details(board, color, move_text):
+    parsed_move = parse_coordinate_move(move_text)
+    from_position = square_to_position(parsed_move["from_square"])
+    to_position = square_to_position(parsed_move["to_square"])
+
+    piece = board.get_piece_at(from_position)
+    if piece is None:
+        raise ValueError(f"No piece at {parsed_move['from_square']}")
+    if piece.color != color:
+        raise ValueError(f"Piece at {parsed_move['from_square']} belongs to {piece.color}")
+
+    promotion_choice = _resolve_promotion_choice(piece, to_position, parsed_move["promotion_piece"])
+    if not board.is_legal_move(color, from_position, to_position, promotion_piece=promotion_choice):
+        raise ValueError("Illegal move for that piece")
+
+    return from_position, to_position, promotion_choice, parsed_move["normalized"]
+
+
+def _resolve_algebraic_move_details(board, color, move_text):
+    parsed_move = parse_algebraic_move(move_text)
+
+    if parsed_move["kind"] == "castle":
+        home_row = 0 if color == "white" else 7
+        from_position = (4, home_row)
+        to_position = (6, home_row) if parsed_move["side"] == "kingside" else (2, home_row)
+
+        piece = board.get_piece_at(from_position)
+        if not isinstance(piece, King) or piece.color != color:
+            raise ValueError("Castling is not legal in this position")
+        if not board.is_legal_move(color, from_position, to_position):
+            raise ValueError("Castling is not legal in this position")
+        return from_position, to_position, None, parsed_move["normalized"]
+
+    to_position = square_to_position(parsed_move["to_square"])
+    candidate_pieces = []
+    for piece in board.pieces:
+        if piece.color != color:
+            continue
+        if not _piece_matches_type(piece, parsed_move["piece_type"]):
+            continue
+        if parsed_move["from_file"] is not None and piece.position[0] != ord(parsed_move["from_file"]) - ord("a"):
+            continue
+        if parsed_move["from_rank"] is not None and piece.position[1] != int(parsed_move["from_rank"]) - 1:
+            continue
+        if board.is_legal_move(color, piece.position, to_position):
+            candidate_pieces.append(piece)
+
+    if not candidate_pieces:
+        raise ValueError("No legal piece can make that algebraic move")
+    if len(candidate_pieces) > 1:
+        raise ValueError("Ambiguous algebraic move; use source-destination notation")
+
+    piece = candidate_pieces[0]
+    target_piece = board.get_piece_at(to_position)
+    is_capture = (target_piece is not None and target_piece.color != color) or _is_en_passant_capture_move(board, piece, to_position)
+    if parsed_move["is_capture"] and not is_capture:
+        raise ValueError("Move marks capture, but no capture is available")
+    if not parsed_move["is_capture"] and is_capture:
+        raise ValueError("Captures must include 'x' in algebraic notation")
+
+    promotion_choice = _resolve_promotion_choice(piece, to_position, parsed_move["promotion_piece"])
+    if not board.is_legal_move(color, piece.position, to_position, promotion_piece=promotion_choice):
+        raise ValueError("No legal piece can make that algebraic move")
+
+    return piece.position, to_position, promotion_choice, parsed_move["normalized"]
+
+
+def move_text_to_algebraic(board, color, move_text):
+    try:
+        from_position, to_position, promotion_choice, _ = _resolve_coordinate_move_details(board, color, move_text)
+    except ValueError as coordinate_error:
+        if "Invalid move format" not in str(coordinate_error):
+            raise
+        from_position, to_position, promotion_choice, _ = _resolve_algebraic_move_details(board, color, move_text)
+
+    piece = board.get_piece_at(from_position)
+    if piece is None or piece.color != color:
+        raise ValueError("Cannot render algebraic notation for missing piece")
+
+    from_col, from_row = from_position
+    to_col, to_row = to_position
+
+    if isinstance(piece, King) and abs(to_col - from_col) == 2:
+        return "O-O" if to_col > from_col else "O-O-O"
+
+    target_piece = board.get_piece_at(to_position)
+    is_capture = (target_piece is not None and target_piece.color != color) or _is_en_passant_capture_move(board, piece, to_position)
+    destination = position_to_square(to_position)
+
+    if isinstance(piece, Pawn):
+        prefix = f"{chr(ord('a') + from_col)}x" if is_capture else ""
+        promotion_suffix = ""
+        if to_row in (0, 7):
+            promotion_suffix = f"={(promotion_choice or 'q').upper()}"
+        return f"{prefix}{destination}{promotion_suffix}"
+
+    piece_letter = _piece_letter_for_algebraic(piece)
+    capture_marker = "x" if is_capture else ""
+    return f"{piece_letter}{capture_marker}{destination}"
+
+
 def get_ai_profiles():
     profiles = [RANDOM_AI_PROFILE]
     for difficulty in AI_DIFFICULTIES:
@@ -363,10 +478,15 @@ def convert_legacy_save_text_to_pgn(save_text):
     pgn_chunks = []
     for game in games:
         header_lines = _build_pgn_header_lines(game["started_at"], result="*")
-        move_fragments = [
-            _move_to_pgn_fragment(move["move_number"], move["color"], move["move_text"])
-            for move in game["moves"]
-        ]
+        board = Board()
+        move_fragments = []
+        for move in game["moves"]:
+            color = move["color"]
+            move_text = move["move_text"]
+            algebraic_move = move_text_to_algebraic(board, color, move_text)
+            apply_user_move(board, color, move_text)
+            move_fragments.append(_move_to_pgn_fragment(move["move_number"], color, algebraic_move))
+
         movetext = "".join(move_fragments).strip()
         if movetext:
             movetext = f"{movetext} *"
@@ -861,22 +981,9 @@ class Board:
 
 
 def apply_coordinate_move(board, color, move_text):
-    parsed_move = parse_coordinate_move(move_text)
-    from_position = square_to_position(parsed_move["from_square"])
-    to_position = square_to_position(parsed_move["to_square"])
-
-    piece = board.get_piece_at(from_position)
-    if piece is None:
-        raise ValueError(f"No piece at {parsed_move['from_square']}")
-    if piece.color != color:
-        raise ValueError(f"Piece at {parsed_move['from_square']} belongs to {piece.color}")
-
-    promotion_choice = _resolve_promotion_choice(piece, to_position, parsed_move["promotion_piece"])
-    if not board.is_legal_move(color, from_position, to_position, promotion_piece=promotion_choice):
-        raise ValueError("Illegal move for that piece")
-
+    from_position, to_position, promotion_choice, normalized_move = _resolve_coordinate_move_details(board, color, move_text)
     board.move_piece(from_position, to_position, promotion_piece=promotion_choice)
-    return board.get_piece_at(to_position), to_position, parsed_move["normalized"]
+    return board.get_piece_at(to_position), to_position, normalized_move
 
 
 def _piece_matches_type(piece, piece_type):
@@ -906,55 +1013,9 @@ def _resolve_promotion_choice(piece, to_position, promotion_piece):
 
 
 def apply_algebraic_move(board, color, move_text):
-    parsed_move = parse_algebraic_move(move_text)
-
-    if parsed_move["kind"] == "castle":
-        home_row = 0 if color == "white" else 7
-        from_position = (4, home_row)
-        to_position = (6, home_row) if parsed_move["side"] == "kingside" else (2, home_row)
-
-        piece = board.get_piece_at(from_position)
-        if not isinstance(piece, King) or piece.color != color:
-            raise ValueError("Castling is not legal in this position")
-        if not board.is_legal_move(color, from_position, to_position):
-            raise ValueError("Castling is not legal in this position")
-
-        board.move_piece(from_position, to_position)
-        return board.get_piece_at(to_position), to_position, parsed_move["normalized"]
-
-    to_position = square_to_position(parsed_move["to_square"])
-    candidate_pieces = []
-    for piece in board.pieces:
-        if piece.color != color:
-            continue
-        if not _piece_matches_type(piece, parsed_move["piece_type"]):
-            continue
-        if parsed_move["from_file"] is not None and piece.position[0] != ord(parsed_move["from_file"]) - ord("a"):
-            continue
-        if parsed_move["from_rank"] is not None and piece.position[1] != int(parsed_move["from_rank"]) - 1:
-            continue
-        if board.is_legal_move(color, piece.position, to_position):
-            candidate_pieces.append(piece)
-
-    if not candidate_pieces:
-        raise ValueError("No legal piece can make that algebraic move")
-    if len(candidate_pieces) > 1:
-        raise ValueError("Ambiguous algebraic move; use source-destination notation")
-
-    piece = candidate_pieces[0]
-    target_piece = board.get_piece_at(to_position)
-    is_capture = (target_piece is not None and target_piece.color != color) or _is_en_passant_capture_move(board, piece, to_position)
-    if parsed_move["is_capture"] and not is_capture:
-        raise ValueError("Move marks capture, but no capture is available")
-    if not parsed_move["is_capture"] and is_capture:
-        raise ValueError("Captures must include 'x' in algebraic notation")
-
-    promotion_choice = _resolve_promotion_choice(piece, to_position, parsed_move["promotion_piece"])
-    if not board.is_legal_move(color, piece.position, to_position, promotion_piece=promotion_choice):
-        raise ValueError("No legal piece can make that algebraic move")
-
-    board.move_piece(piece.position, to_position, promotion_piece=promotion_choice)
-    return board.get_piece_at(to_position), to_position, parsed_move["normalized"]
+    from_position, to_position, promotion_choice, normalized_move = _resolve_algebraic_move_details(board, color, move_text)
+    board.move_piece(from_position, to_position, promotion_piece=promotion_choice)
+    return board.get_piece_at(to_position), to_position, normalized_move
 
 
 def apply_user_move(board, color, move_text):
@@ -1459,8 +1520,10 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
 
         if game_setup["mode"] == "ai_vs_ai":
             ai_profile = game_setup[f"{current_turn}_ai_profile"]
+            board_before_move = board.clone()
             piece, _, to_position, normalized_move = apply_ai_move(board, current_turn, ai_profile)
-            record_move(savefile_path, move_number, current_turn, normalized_move)
+            algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
+            record_move(savefile_path, move_number, current_turn, algebraic_move)
             if ai_vs_ai_show_board:
                 print(f"{move_number}. {current_turn} {normalized_move} ({piece.__class__.__name__} -> {position_to_square(to_position)})")
                 print(board)
@@ -1470,8 +1533,10 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
             continue
 
         if game_setup["mode"] == "vs_ai" and current_turn == game_setup["ai_color"]:
+            board_before_move = board.clone()
             piece, _, to_position, normalized_move = apply_ai_move(board, current_turn, game_setup["ai_profile"])
-            record_move(savefile_path, move_number, current_turn, normalized_move)
+            algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
+            record_move(savefile_path, move_number, current_turn, algebraic_move)
             move_number += 1
             print(f"AI moved {piece.__class__.__name__} to {position_to_square(to_position)}")
             current_turn = board.get_opponent_color(current_turn)
@@ -1486,8 +1551,10 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
 
         if move_text.lower() == "ai":
             try:
+                board_before_move = board.clone()
                 piece, _, to_position, normalized_move = apply_random_ai_move(board, current_turn)
-                record_move(savefile_path, move_number, current_turn, normalized_move)
+                algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
+                record_move(savefile_path, move_number, current_turn, algebraic_move)
                 move_number += 1
                 print(f"AI moved {piece.__class__.__name__} to {position_to_square(to_position)}")
                 current_turn = board.get_opponent_color(current_turn)
@@ -1496,8 +1563,10 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
             continue
 
         try:
+            board_before_move = board.clone()
             piece, to_position, normalized_move = apply_user_move(board, current_turn, move_text)
-            record_move(savefile_path, move_number, current_turn, normalized_move)
+            algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
+            record_move(savefile_path, move_number, current_turn, algebraic_move)
             move_number += 1
             print(f"Moved {piece.__class__.__name__} to {position_to_square(to_position)}")
             current_turn = board.get_opponent_color(current_turn)

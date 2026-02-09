@@ -26,6 +26,7 @@ from chess import (
     finalize_savefile,
     get_ai_profiles,
     get_game_status,
+    move_text_to_algebraic,
     play_match,
     parse_algebraic_move,
     parse_coordinate_move,
@@ -696,9 +697,16 @@ def test_convert_legacy_save_text_to_pgn():
     converted = convert_legacy_save_text_to_pgn(legacy_text)
 
     assert "[Date \"2026.02.08\"]" in converted
-    assert "1. e2e4 e7e5 2. g1f3 *" in converted
-    assert "1. d2d4 d7d5 *" in converted
+    assert "1. e4 e5 2. Nf3 *" in converted
+    assert "1. d4 d5 *" in converted
     assert converted.count("[Event \"OpenCode Chess CLI\"]") == 2
+
+
+def test_move_text_to_algebraic_converts_coordinate_notation():
+    board = Board()
+    assert move_text_to_algebraic(board, "white", "e2e4") == "e4"
+    apply_coordinate_move(board, "white", "e2e4")
+    assert move_text_to_algebraic(board, "black", "g8f6") == "Nf6"
 
 
 def run_all_tests():
@@ -740,6 +748,7 @@ def run_all_tests():
         test_tournament_writes_results_and_scoreboard,
         test_savefile_records_moves,
         test_convert_legacy_save_text_to_pgn,
+        test_move_text_to_algebraic_converts_coordinate_notation,
     ]
 
     for test in tests:
