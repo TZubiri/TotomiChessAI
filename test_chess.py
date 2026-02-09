@@ -23,6 +23,8 @@ from chess import (
     choose_random_legal_move,
     c_evaluator_available,
     c_search_available,
+    create_c_search_cache,
+    destroy_c_search_cache,
     convert_legacy_save_text_to_pgn,
     configure_game_menu,
     evaluate_material,
@@ -840,6 +842,42 @@ def test_c_search_returns_legal_move_when_available():
     assert move in board.get_legal_moves_for_color("white")
 
 
+def test_c_search_cache_handle_reused_across_turns():
+    if not c_search_available():
+        return
+
+    board = Board()
+    profiles = get_ai_profiles()
+    profile = next(profile for profile in profiles if profile["id"] == "d3_basic")
+    cache_handle = create_c_search_cache()
+    assert cache_handle is not None
+
+    try:
+        piece_one, from_one, to_one, _ = apply_ai_move(
+            board,
+            "white",
+            profile,
+            rng=random.Random(1),
+            search_cache_handle=cache_handle,
+        )
+        assert piece_one is not None
+        assert from_one is not None
+        assert to_one is not None
+
+        move_two = choose_minimax_legal_move(
+            board,
+            "black",
+            profile["plies"],
+            profile["piece_values"],
+            rng=random.Random(2),
+            search_cache_handle=cache_handle,
+        )
+        assert move_two is not None
+        assert move_two in board.get_legal_moves_for_color("black")
+    finally:
+        destroy_c_search_cache(cache_handle)
+
+
 def run_all_tests():
     tests = [
         test_position_move_counts,
@@ -887,6 +925,7 @@ def run_all_tests():
         test_move_text_to_algebraic_uses_pawn_file_on_capture,
         test_c_piece_evaluation_matches_python_when_available,
         test_c_search_returns_legal_move_when_available,
+        test_c_search_cache_handle_reused_across_turns,
     ]
 
     for test in tests:

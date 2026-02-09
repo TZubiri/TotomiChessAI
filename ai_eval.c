@@ -1,4 +1,7 @@
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define MAX_PIECES 64
 #define MAX_MOVES 256
@@ -58,6 +61,20 @@ typedef struct {
     double opposite_bishop_draw_factor;
     int has_opposite_bishop_draw_factor;
 } EvalParams;
+
+typedef struct {
+    uint64_t key;
+    int remaining_plies;
+    int active_color;
+    double material;
+    double heuristic;
+    uint8_t valid;
+} CacheEntry;
+
+typedef struct {
+    size_t capacity;
+    CacheEntry* entries;
+} SearchCache;
 
 static int is_inside(int col, int row) {
     return col >= 0 && col < 8 && row >= 0 && row < 8;
@@ -692,6 +709,129 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
     return score;
 }
 
+static uint64_t hash_mix(uint64_t hash, uint64_t value) {
+    hash ^= value + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+static uint64_t hash_state(const SearchState* state, int active_color, int remaining_plies) {
+    uint64_t hash = 1469598103934665603ULL;
+    for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+            int piece_index = state->board[row][col];
+            if (piece_index == -1 || !state->alive[piece_index]) {
+                hash = hash_mix(hash, 0ULL);
+                continue;
+            }
+            uint64_t piece_bits = (uint64_t)state->piece_type[piece_index]
+                | ((uint64_t)state->piece_color[piece_index] << 3)
+                | ((uint64_t)(state->piece_moved[piece_index] ? 1 : 0) << 4)
+                | ((uint64_t)col << 8)
+                | ((uint64_t)row << 16);
+            hash = hash_mix(hash, piece_bits + 1ULL);
+        }
+    }
+
+    uint64_t en_passant_bits = (uint64_t)(state->en_passant_target_col + 1)
+        | ((uint64_t)(state->en_passant_target_row + 1) << 4)
+        | ((uint64_t)(state->en_passant_capture_col + 1) << 8)
+        | ((uint64_t)(state->en_passant_capture_row + 1) << 12);
+    hash = hash_mix(hash, en_passant_bits);
+    hash = hash_mix(hash, (uint64_t)state->halfmove_clock);
+    hash = hash_mix(hash, (uint64_t)active_color);
+    hash = hash_mix(hash, (uint64_t)remaining_plies);
+    return hash;
+}
+
+static int cache_lookup(
+    const SearchCache* cache,
+    uint64_t key,
+    int active_color,
+    int remaining_plies,
+    Score* out_score
+) {
+    if (cache == NULL || cache->entries == NULL || cache->capacity == 0) {
+        return 0;
+    }
+
+    size_t index = (size_t)(key & (uint64_t)(cache->capacity - 1));
+    const CacheEntry* entry = &cache->entries[index];
+    if (
+        !entry->valid
+        || entry->key != key
+        || entry->active_color != active_color
+        || entry->remaining_plies != remaining_plies
+    ) {
+        return 0;
+    }
+
+    out_score->material = entry->material;
+    out_score->heuristic = entry->heuristic;
+    return 1;
+}
+
+static void cache_store(
+    SearchCache* cache,
+    uint64_t key,
+    int active_color,
+    int remaining_plies,
+    Score score
+) {
+    if (cache == NULL || cache->entries == NULL || cache->capacity == 0) {
+        return;
+    }
+
+    size_t index = (size_t)(key & (uint64_t)(cache->capacity - 1));
+    CacheEntry* entry = &cache->entries[index];
+    entry->valid = 1;
+    entry->key = key;
+    entry->active_color = active_color;
+    entry->remaining_plies = remaining_plies;
+    entry->material = score.material;
+    entry->heuristic = score.heuristic;
+}
+
+void* create_search_cache_c(size_t max_bytes) {
+    if (max_bytes < sizeof(CacheEntry) * 2) {
+        return NULL;
+    }
+
+    SearchCache* cache = (SearchCache*)malloc(sizeof(SearchCache));
+    if (cache == NULL) {
+        return NULL;
+    }
+
+    size_t capacity = max_bytes / sizeof(CacheEntry);
+    size_t pow2_capacity = 1;
+    while (pow2_capacity <= capacity / 2) {
+        pow2_capacity <<= 1;
+    }
+
+    while (pow2_capacity >= 2) {
+        CacheEntry* entries = (CacheEntry*)calloc(pow2_capacity, sizeof(CacheEntry));
+        if (entries != NULL) {
+            cache->capacity = pow2_capacity;
+            cache->entries = entries;
+            return (void*)cache;
+        }
+        pow2_capacity >>= 1;
+    }
+
+    free(cache);
+    return NULL;
+}
+
+void destroy_search_cache_c(void* cache_ptr) {
+    if (cache_ptr == NULL) {
+        return;
+    }
+    SearchCache* cache = (SearchCache*)cache_ptr;
+    free(cache->entries);
+    cache->entries = NULL;
+    cache->capacity = 0;
+    free(cache);
+}
+
 enum {
     STATUS_IN_PROGRESS = 0,
     STATUS_DRAW = 1,
@@ -746,24 +886,39 @@ static Score minimax_score_state(
     int active_color,
     int perspective_color,
     int remaining_plies,
-    const EvalParams* params
+    const EvalParams* params,
+    SearchCache* cache
 ) {
+    uint64_t key = hash_state(state, active_color, remaining_plies);
+    Score cached_score;
+    if (cache_lookup(cache, key, active_color, remaining_plies, &cached_score)) {
+        return cached_score;
+    }
+
     int winner = -1;
     int state_status = get_game_status_state(state, active_color, &winner);
     if (state_status == STATUS_WIN) {
-        return score_for_winner(winner, perspective_color);
+        Score score = score_for_winner(winner, perspective_color);
+        cache_store(cache, key, active_color, remaining_plies, score);
+        return score;
     }
     if (state_status == STATUS_DRAW) {
-        return draw_score();
+        Score score = draw_score();
+        cache_store(cache, key, active_color, remaining_plies, score);
+        return score;
     }
     if (remaining_plies <= 0) {
-        return evaluate_state(state, perspective_color, params);
+        Score score = evaluate_state(state, perspective_color, params);
+        cache_store(cache, key, active_color, remaining_plies, score);
+        return score;
     }
 
     MoveList legal_moves;
     generate_legal_moves_for_color(state, active_color, &legal_moves);
     if (legal_moves.count == 0) {
-        return draw_score();
+        Score score = draw_score();
+        cache_store(cache, key, active_color, remaining_plies, score);
+        return score;
     }
 
     int next_color = opponent_color(active_color);
@@ -776,11 +931,12 @@ static Score minimax_score_state(
             if (!apply_move(&child, &legal_moves.entries[i])) {
                 continue;
             }
-            Score current = minimax_score_state(&child, next_color, perspective_color, remaining_plies - 1, params);
+            Score current = minimax_score_state(&child, next_color, perspective_color, remaining_plies - 1, params, cache);
             if (compare_score(current, best) > 0) {
                 best = current;
             }
         }
+        cache_store(cache, key, active_color, remaining_plies, best);
         return best;
     }
 
@@ -792,11 +948,12 @@ static Score minimax_score_state(
         if (!apply_move(&child, &legal_moves.entries[i])) {
             continue;
         }
-        Score current = minimax_score_state(&child, next_color, perspective_color, remaining_plies - 1, params);
+        Score current = minimax_score_state(&child, next_color, perspective_color, remaining_plies - 1, params, cache);
         if (compare_score(current, best) < 0) {
             best = current;
         }
     }
+    cache_store(cache, key, active_color, remaining_plies, best);
     return best;
 }
 
@@ -892,7 +1049,8 @@ int choose_best_move_c(
     int* out_from_col,
     int* out_from_row,
     int* out_to_col,
-    int* out_to_row
+    int* out_to_row,
+    void* cache_ptr
 ) {
     if (
         piece_types == NULL
@@ -912,6 +1070,8 @@ int choose_best_move_c(
     if (active_color != 0 && active_color != 1) {
         return 0;
     }
+
+    SearchCache* cache = (SearchCache*)cache_ptr;
 
     SearchState root;
     if (!init_state(
@@ -960,7 +1120,7 @@ int choose_best_move_c(
         if (!apply_move(&child, &legal_moves.entries[i])) {
             continue;
         }
-        Score score = minimax_score_state(&child, next_color, active_color, plies - 1, &params);
+        Score score = minimax_score_state(&child, next_color, active_color, plies - 1, &params, cache);
         if (compare_score(score, best_score) > 0) {
             best_score = score;
             best_index = i;

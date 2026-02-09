@@ -20,10 +20,13 @@ PIECE_ORDER = ["pawn", "knight", "bishop", "rook", "queen", "king"]
 PIECE_INDEX_BY_TYPE = {piece_type: index for index, piece_type in enumerate(PIECE_ORDER)}
 C_EVAL_SOURCE = os.path.join(os.path.dirname(__file__), "ai_eval.c")
 C_EVAL_LIBRARY = os.path.join(os.path.dirname(__file__), "ai_eval.so")
+C_SEARCH_CACHE_MAX_BYTES = 1024 * 1024 * 1024
 _C_EVAL_FUNCTION = None
 _C_EVAL_ATTEMPTED = False
 _C_EVAL_LIBRARY_HANDLE = None
 _C_SEARCH_FUNCTION = None
+_C_CREATE_SEARCH_CACHE_FUNCTION = None
+_C_DESTROY_SEARCH_CACHE_FUNCTION = None
 
 AI_PERSONALITIES = [
     {
@@ -466,6 +469,9 @@ def _load_c_eval_function():
     global _C_EVAL_ATTEMPTED
     global _C_EVAL_FUNCTION
     global _C_EVAL_LIBRARY_HANDLE
+    global _C_SEARCH_FUNCTION
+    global _C_CREATE_SEARCH_CACHE_FUNCTION
+    global _C_DESTROY_SEARCH_CACHE_FUNCTION
 
     if _C_EVAL_ATTEMPTED:
         return _C_EVAL_FUNCTION
@@ -493,6 +499,10 @@ def _load_c_eval_function():
         _C_EVAL_LIBRARY_HANDLE = ctypes.CDLL(C_EVAL_LIBRARY)
     except OSError:
         return None
+
+    _C_SEARCH_FUNCTION = None
+    _C_CREATE_SEARCH_CACHE_FUNCTION = None
+    _C_DESTROY_SEARCH_CACHE_FUNCTION = None
 
     evaluate_function = _C_EVAL_LIBRARY_HANDLE.evaluate_piece_components_c
     evaluate_function.argtypes = [
@@ -637,6 +647,7 @@ def _load_c_search_function():
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
+        ctypes.c_void_p,
     ]
     search_function.restype = ctypes.c_int
     _C_SEARCH_FUNCTION = search_function
@@ -645,6 +656,51 @@ def _load_c_search_function():
 
 def c_search_available():
     return _load_c_search_function() is not None
+
+
+def _load_c_search_cache_functions():
+    global _C_CREATE_SEARCH_CACHE_FUNCTION
+    global _C_DESTROY_SEARCH_CACHE_FUNCTION
+
+    if _C_CREATE_SEARCH_CACHE_FUNCTION is not None and _C_DESTROY_SEARCH_CACHE_FUNCTION is not None:
+        return _C_CREATE_SEARCH_CACHE_FUNCTION, _C_DESTROY_SEARCH_CACHE_FUNCTION
+
+    if _load_c_eval_function() is None or _C_EVAL_LIBRARY_HANDLE is None:
+        return None, None
+
+    try:
+        create_function = _C_EVAL_LIBRARY_HANDLE.create_search_cache_c
+        destroy_function = _C_EVAL_LIBRARY_HANDLE.destroy_search_cache_c
+    except AttributeError:
+        return None, None
+
+    create_function.argtypes = [ctypes.c_size_t]
+    create_function.restype = ctypes.c_void_p
+    destroy_function.argtypes = [ctypes.c_void_p]
+    destroy_function.restype = None
+
+    _C_CREATE_SEARCH_CACHE_FUNCTION = create_function
+    _C_DESTROY_SEARCH_CACHE_FUNCTION = destroy_function
+    return _C_CREATE_SEARCH_CACHE_FUNCTION, _C_DESTROY_SEARCH_CACHE_FUNCTION
+
+
+def create_c_search_cache(max_bytes=C_SEARCH_CACHE_MAX_BYTES):
+    create_function, _ = _load_c_search_cache_functions()
+    if create_function is None:
+        return None
+    cache_pointer = create_function(int(max_bytes))
+    if not cache_pointer:
+        return None
+    return cache_pointer
+
+
+def destroy_c_search_cache(cache_handle):
+    if not cache_handle:
+        return
+    _, destroy_function = _load_c_search_cache_functions()
+    if destroy_function is None:
+        return
+    destroy_function(cache_handle)
 
 
 def _choose_minimax_legal_move_c(
@@ -657,6 +713,7 @@ def _choose_minimax_legal_move_c(
     position_multipliers=None,
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
+    search_cache_handle=None,
 ):
     if plies <= 0:
         return None
@@ -723,6 +780,7 @@ def _choose_minimax_legal_move_c(
         ctypes.byref(out_from_row),
         ctypes.byref(out_to_col),
         ctypes.byref(out_to_row),
+        search_cache_handle,
     )
 
     if result != 1:
@@ -1806,6 +1864,7 @@ def choose_minimax_legal_move(
     position_multipliers=None,
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
+    search_cache_handle=None,
 ):
     legal_moves = board.get_legal_moves_for_color(color)
     if not legal_moves:
@@ -1824,6 +1883,7 @@ def choose_minimax_legal_move(
         position_multipliers=position_multipliers,
         control_weight=control_weight,
         opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        search_cache_handle=search_cache_handle,
     )
     if c_move is not None:
         return c_move
@@ -1870,11 +1930,17 @@ def choose_ai_move(board, color, ai_profile, rng=None):
         position_multipliers=ai_profile.get("position_multipliers"),
         control_weight=ai_profile.get("control_weight", 0.0),
         opposite_bishop_draw_factor=ai_profile.get("opposite_bishop_draw_factor"),
+        search_cache_handle=ai_profile.get("search_cache_handle"),
     )
 
 
-def apply_ai_move(board, color, ai_profile, rng=None):
-    chosen_move = choose_ai_move(board, color, ai_profile, rng=rng)
+def apply_ai_move(board, color, ai_profile, rng=None, search_cache_handle=None):
+    effective_profile = ai_profile
+    if search_cache_handle is not None:
+        effective_profile = dict(ai_profile)
+        effective_profile["search_cache_handle"] = search_cache_handle
+
+    chosen_move = choose_ai_move(board, color, effective_profile, rng=rng)
     if chosen_move is None:
         raise ValueError(f"No legal moves available for {color}")
 
@@ -1970,11 +2036,28 @@ def _match_result_message(status):
         return f"Draw by {status['reason'].replace('_', ' ')}."
     return "Match ended."
 
+
+def _create_match_ai_caches(game_setup):
+    ai_caches = {}
+    if game_setup["mode"] == "ai_vs_ai":
+        ai_caches["white"] = create_c_search_cache()
+        ai_caches["black"] = create_c_search_cache()
+    elif game_setup["mode"] == "vs_ai":
+        ai_color = game_setup["ai_color"]
+        ai_caches[ai_color] = create_c_search_cache()
+    return ai_caches
+
+
+def _destroy_match_ai_caches(ai_caches):
+    for cache_handle in ai_caches.values():
+        destroy_c_search_cache(cache_handle)
+
 def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=True):
     board = Board()
     current_turn = "white"
     move_number = 1
     start_savefile(savefile_path)
+    ai_caches = _create_match_ai_caches(game_setup)
 
     fast_mode = game_setup["mode"] == "ai_vs_ai"
     if not fast_mode:
@@ -1983,73 +2066,86 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
         print("Type 'quit' to exit to menu.")
         print(f"Saving moves to {savefile_path}")
 
-    while True:
-        if not fast_mode:
-            print()
-            print(board)
-        status = get_game_status(board, current_turn)
-        if status["winner"] is not None or status["state"] == "draw":
-            if fast_mode:
-                print(_match_result_message(status))
-            else:
-                print(_match_result_message(status))
-            finalize_savefile(savefile_path, status)
-            return status
-
-        if game_setup["mode"] == "ai_vs_ai":
-            ai_profile = game_setup[f"{current_turn}_ai_profile"]
-            board_before_move = board.clone()
-            piece, _, to_position, normalized_move = apply_ai_move(board, current_turn, ai_profile)
-            algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
-            record_move(savefile_path, move_number, current_turn, algebraic_move)
-            if ai_vs_ai_show_board:
-                print(f"{move_number}. {current_turn} {normalized_move} ({piece.__class__.__name__} -> {position_to_square(to_position)})")
-                print(board)
+    try:
+        while True:
+            if not fast_mode:
                 print()
-            move_number += 1
-            current_turn = board.get_opponent_color(current_turn)
-            continue
+                print(board)
+            status = get_game_status(board, current_turn)
+            if status["winner"] is not None or status["state"] == "draw":
+                if fast_mode:
+                    print(_match_result_message(status))
+                else:
+                    print(_match_result_message(status))
+                finalize_savefile(savefile_path, status)
+                return status
 
-        if game_setup["mode"] == "vs_ai" and current_turn == game_setup["ai_color"]:
-            board_before_move = board.clone()
-            piece, _, to_position, normalized_move = apply_ai_move(board, current_turn, game_setup["ai_profile"])
-            algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
-            record_move(savefile_path, move_number, current_turn, algebraic_move)
-            move_number += 1
-            print(f"AI moved {piece.__class__.__name__} to {position_to_square(to_position)}")
-            current_turn = board.get_opponent_color(current_turn)
-            continue
-
-        move_text = input(f"{current_turn}> ").strip()
-        if move_text.lower() in {"quit", "exit"}:
-            print("Returning to menu")
-            status = {"state": "aborted", "reason": "quit", "winner": None}
-            finalize_savefile(savefile_path, status)
-            return status
-
-        if move_text.lower() == "ai":
-            try:
+            if game_setup["mode"] == "ai_vs_ai":
+                ai_profile = game_setup[f"{current_turn}_ai_profile"]
                 board_before_move = board.clone()
-                piece, _, to_position, normalized_move = apply_random_ai_move(board, current_turn)
+                piece, _, to_position, normalized_move = apply_ai_move(
+                    board,
+                    current_turn,
+                    ai_profile,
+                    search_cache_handle=ai_caches.get(current_turn),
+                )
+                algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
+                record_move(savefile_path, move_number, current_turn, algebraic_move)
+                if ai_vs_ai_show_board:
+                    print(f"{move_number}. {current_turn} {normalized_move} ({piece.__class__.__name__} -> {position_to_square(to_position)})")
+                    print(board)
+                    print()
+                move_number += 1
+                current_turn = board.get_opponent_color(current_turn)
+                continue
+
+            if game_setup["mode"] == "vs_ai" and current_turn == game_setup["ai_color"]:
+                board_before_move = board.clone()
+                piece, _, to_position, normalized_move = apply_ai_move(
+                    board,
+                    current_turn,
+                    game_setup["ai_profile"],
+                    search_cache_handle=ai_caches.get(current_turn),
+                )
                 algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
                 record_move(savefile_path, move_number, current_turn, algebraic_move)
                 move_number += 1
                 print(f"AI moved {piece.__class__.__name__} to {position_to_square(to_position)}")
                 current_turn = board.get_opponent_color(current_turn)
+                continue
+
+            move_text = input(f"{current_turn}> ").strip()
+            if move_text.lower() in {"quit", "exit"}:
+                print("Returning to menu")
+                status = {"state": "aborted", "reason": "quit", "winner": None}
+                finalize_savefile(savefile_path, status)
+                return status
+
+            if move_text.lower() == "ai":
+                try:
+                    board_before_move = board.clone()
+                    piece, _, to_position, normalized_move = apply_random_ai_move(board, current_turn)
+                    algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
+                    record_move(savefile_path, move_number, current_turn, algebraic_move)
+                    move_number += 1
+                    print(f"AI moved {piece.__class__.__name__} to {position_to_square(to_position)}")
+                    current_turn = board.get_opponent_color(current_turn)
+                except ValueError as error:
+                    print(f"Illegal move: {error}")
+                continue
+
+            try:
+                board_before_move = board.clone()
+                piece, to_position, normalized_move = apply_user_move(board, current_turn, move_text)
+                algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
+                record_move(savefile_path, move_number, current_turn, algebraic_move)
+                move_number += 1
+                print(f"Moved {piece.__class__.__name__} to {position_to_square(to_position)}")
+                current_turn = board.get_opponent_color(current_turn)
             except ValueError as error:
                 print(f"Illegal move: {error}")
-            continue
-
-        try:
-            board_before_move = board.clone()
-            piece, to_position, normalized_move = apply_user_move(board, current_turn, move_text)
-            algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
-            record_move(savefile_path, move_number, current_turn, algebraic_move)
-            move_number += 1
-            print(f"Moved {piece.__class__.__name__} to {position_to_square(to_position)}")
-            current_turn = board.get_opponent_color(current_turn)
-        except ValueError as error:
-            print(f"Illegal move: {error}")
+    finally:
+        _destroy_match_ai_caches(ai_caches)
 
 
 def play_cli(savefile_path=DEFAULT_SAVEFILE):

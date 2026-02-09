@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from chess import Board, apply_ai_move, get_ai_profiles, get_game_status
+from chess import Board, apply_ai_move, create_c_search_cache, destroy_c_search_cache, get_ai_profiles, get_game_status
 
 
 def build_fixtures(players, mode):
@@ -29,28 +29,42 @@ def play_ai_match(white_profile, black_profile, rng, max_halfmoves):
     current_turn = "white"
     move_list = []
     ai_by_color = {"white": white_profile, "black": black_profile}
+    ai_caches = {
+        "white": create_c_search_cache(),
+        "black": create_c_search_cache(),
+    }
 
-    while True:
-        status = get_game_status(board, current_turn)
-        if status["state"] != "in_progress":
-            break
+    try:
+        while True:
+            status = get_game_status(board, current_turn)
+            if status["state"] != "in_progress":
+                break
 
-        if len(move_list) >= max_halfmoves:
-            status = {"state": "draw", "reason": "move_limit", "winner": None}
-            break
+            if len(move_list) >= max_halfmoves:
+                status = {"state": "draw", "reason": "move_limit", "winner": None}
+                break
 
-        piece, from_pos, to_pos, move_text = apply_ai_move(board, current_turn, ai_by_color[current_turn], rng=rng)
-        move_list.append(
-            {
-                "ply": len(move_list) + 1,
-                "color": current_turn,
-                "piece": piece.__class__.__name__,
-                "from": [from_pos[0], from_pos[1]],
-                "to": [to_pos[0], to_pos[1]],
-                "move": move_text,
-            }
-        )
-        current_turn = board.get_opponent_color(current_turn)
+            piece, from_pos, to_pos, move_text = apply_ai_move(
+                board,
+                current_turn,
+                ai_by_color[current_turn],
+                rng=rng,
+                search_cache_handle=ai_caches.get(current_turn),
+            )
+            move_list.append(
+                {
+                    "ply": len(move_list) + 1,
+                    "color": current_turn,
+                    "piece": piece.__class__.__name__,
+                    "from": [from_pos[0], from_pos[1]],
+                    "to": [to_pos[0], to_pos[1]],
+                    "move": move_text,
+                }
+            )
+            current_turn = board.get_opponent_color(current_turn)
+    finally:
+        destroy_c_search_cache(ai_caches["white"])
+        destroy_c_search_cache(ai_caches["black"])
 
     if status["winner"] == "white":
         white_points = 1.0
