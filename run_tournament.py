@@ -115,6 +115,8 @@ def write_scoreboard(output_root, rows):
                 "losses",
                 "raw_points",
                 "points",
+                "h2h_tiebreak",
+                "sb_tiebreak",
             ]
         )
         for index, row in enumerate(rows, start=1):
@@ -129,6 +131,8 @@ def write_scoreboard(output_root, rows):
                     row["losses"],
                     f"{row['raw_points']:.2f}",
                     f"{row['points']:.2f}",
+                    f"{row['h2h_tiebreak']:.2f}",
+                    f"{row['sb_tiebreak']:.2f}",
                 ]
             )
 
@@ -154,10 +158,50 @@ def _status_reason_label(status):
 def _top_rows(scoreboard, max_score, count=3):
     rows = sorted(
         scoreboard.values(),
-        key=lambda row: (row["points"], row["raw_points"], row["wins"]),
+        key=lambda row: (
+            row["points"],
+            row["raw_points"],
+            row.get("h2h_tiebreak", 0.0),
+            row.get("sb_tiebreak", 0.0),
+            row["wins"],
+        ),
         reverse=True,
     )
     return [f"{index}. {row['name']} {row['points']:.2f}/{max_score}" for index, row in enumerate(rows[:count], start=1)]
+
+
+def rank_rows_with_tiebreakers(scoreboard, head_to_head_points):
+    rows_by_id = {row["id"]: row for row in scoreboard.values()}
+    grouped_ids_by_raw_points = {}
+    for player_id, row in rows_by_id.items():
+        grouped_ids_by_raw_points.setdefault(row["raw_points"], []).append(player_id)
+
+    all_player_ids = list(rows_by_id)
+    for player_id, row in rows_by_id.items():
+        tied_ids = grouped_ids_by_raw_points[row["raw_points"]]
+        row["h2h_tiebreak"] = sum(
+            head_to_head_points.get(player_id, {}).get(opponent_id, 0.0)
+            for opponent_id in tied_ids
+            if opponent_id != player_id
+        )
+        row["sb_tiebreak"] = sum(
+            head_to_head_points.get(player_id, {}).get(opponent_id, 0.0) * rows_by_id[opponent_id]["raw_points"]
+            for opponent_id in all_player_ids
+            if opponent_id != player_id
+        )
+
+    return sorted(
+        rows_by_id.values(),
+        key=lambda row: (
+            row["points"],
+            row["raw_points"],
+            row["h2h_tiebreak"],
+            row["sb_tiebreak"],
+            row["wins"],
+            row["id"],
+        ),
+        reverse=True,
+    )
 
 
 def run_tournament(
@@ -191,6 +235,10 @@ def run_tournament(
         }
         for player in players
     }
+    head_to_head_points = {
+        player["id"]: {}
+        for player in players
+    }
 
     total_matches = len(fixtures)
     max_score = len(players) - 1
@@ -212,6 +260,12 @@ def run_tournament(
         black_row["games"] += 1
         white_row["raw_points"] += result["white_points"]
         black_row["raw_points"] += result["black_points"]
+        head_to_head_points[white_profile["id"]][black_profile["id"]] = (
+            head_to_head_points[white_profile["id"]].get(black_profile["id"], 0.0) + result["white_points"]
+        )
+        head_to_head_points[black_profile["id"]][white_profile["id"]] = (
+            head_to_head_points[black_profile["id"]].get(white_profile["id"], 0.0) + result["black_points"]
+        )
 
         if result["white_points"] == 1.0:
             white_row["wins"] += 1
@@ -239,8 +293,12 @@ def run_tournament(
                 scale = max_score / max_games_so_far if max_games_so_far else 0.0
                 for row in scoreboard.values():
                     row["points"] = row["raw_points"] * scale
+                current_rows = rank_rows_with_tiebreakers(scoreboard, head_to_head_points)
                 print("Current top 3:")
-                for line in _top_rows(scoreboard, max_score):
+                for line in [
+                    f"{index}. {row['name']} {row['points']:.2f}/{max_score}"
+                    for index, row in enumerate(current_rows[:3], start=1)
+                ]:
                     print(f"  {line}")
 
     max_games = max((entry["games"] for entry in scoreboard.values()), default=0)
@@ -248,11 +306,7 @@ def run_tournament(
     for row in scoreboard.values():
         row["points"] = row["raw_points"] * score_scale
 
-    sorted_rows = sorted(
-        scoreboard.values(),
-        key=lambda row: (row["points"], row["raw_points"], row["wins"]),
-        reverse=True,
-    )
+    sorted_rows = rank_rows_with_tiebreakers(scoreboard, head_to_head_points)
     write_scoreboard(output_root, sorted_rows)
 
     manifest = {
@@ -263,7 +317,10 @@ def run_tournament(
         "match_count": len(fixtures),
         "max_halfmoves": max_halfmoves,
         "max_score": max_score,
-        "notes": "points are normalized to max_score; raw_points retain standard scoring",
+        "notes": (
+            "points are normalized to max_score; raw_points retain standard scoring; "
+            "ties are broken by head-to-head among tied players, then Sonneborn-Berger"
+        ),
     }
     with open(output_root / "manifest.json", "w", encoding="utf-8") as manifest_file:
         json.dump(manifest, manifest_file, indent=2)

@@ -38,7 +38,7 @@ from chess import (
     record_move,
     start_savefile,
 )
-from run_tournament import build_fixtures, run_tournament
+from run_tournament import build_fixtures, rank_rows_with_tiebreakers, run_tournament
 
 
 def _empty_board():
@@ -645,6 +645,52 @@ def test_tournament_fixture_counts():
     assert len(build_fixtures(profiles, "single")) == 120
 
 
+def test_tournament_tiebreaker_prefers_head_to_head_for_champion_tie():
+    scoreboard = {
+        "a": {
+            "id": "a",
+            "name": "A",
+            "games": 4,
+            "wins": 2,
+            "draws": 0,
+            "losses": 2,
+            "raw_points": 2.0,
+            "points": 2.0,
+        },
+        "b": {
+            "id": "b",
+            "name": "B",
+            "games": 4,
+            "wins": 2,
+            "draws": 0,
+            "losses": 2,
+            "raw_points": 2.0,
+            "points": 2.0,
+        },
+        "c": {
+            "id": "c",
+            "name": "C",
+            "games": 4,
+            "wins": 1,
+            "draws": 0,
+            "losses": 3,
+            "raw_points": 1.0,
+            "points": 1.0,
+        },
+    }
+    head_to_head = {
+        "a": {"b": 1.5, "c": 0.5},
+        "b": {"a": 0.5, "c": 1.5},
+        "c": {"a": 1.5, "b": 0.5},
+    }
+
+    ranked = rank_rows_with_tiebreakers(scoreboard, head_to_head)
+
+    assert ranked[0]["id"] == "a"
+    assert ranked[0]["h2h_tiebreak"] == 1.5
+    assert ranked[1]["id"] == "b"
+
+
 def test_tournament_writes_results_and_scoreboard():
     with tempfile.TemporaryDirectory() as temp_dir:
         manifest, rows = run_tournament(
@@ -828,6 +874,7 @@ def run_all_tests():
         test_minimax_prefers_material_over_heuristic,
         test_pawnwise_control_profile_no_selective_second_ply_pruning,
         test_tournament_fixture_counts,
+        test_tournament_tiebreaker_prefers_head_to_head_for_champion_tie,
         test_tournament_writes_results_and_scoreboard,
         test_savefile_records_moves,
         test_convert_legacy_save_text_to_pgn,
