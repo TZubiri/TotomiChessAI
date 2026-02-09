@@ -68,6 +68,7 @@ AI_DIFFICULTIES = [
     {"plies": 1, "name": "Scout"},
     {"plies": 2, "name": "Thinker"},
     {"plies": 3, "name": "Oracle"},
+    {"plies": 4, "name": "Master"},
 ]
 
 SPECIAL_AI_PROFILES = [
@@ -132,7 +133,37 @@ SPECIAL_AI_PROFILES = [
         },
         "control_weight": 0.12,
         "opposite_bishop_draw_factor": 0.5,
-    }
+    },
+    {
+        "id": "d3_pawnwise",
+        "name": "Oracle Pawnwise",
+        "plies": 3,
+        "personality_name": "Pawnwise",
+        "piece_values": {
+            "pawn": 1.0,
+            "knight": 3.0,
+            "bishop": 3.0,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 0.0,
+        },
+        "pawn_rank_values": {
+            5: 1.1,
+            6: 1.3,
+            7: 1.5,
+            8: 8.0,
+        },
+        "backward_pawn_value": 0.8,
+        "position_multipliers": {
+            "center": 1.3,
+            "center_cross": 1.2,
+            "center_diagonal": 1.15,
+            "corner": 0.8,
+            "corner_rook": 0.9,
+            "corner_touch": 0.85,
+            "corner_touch_rook": 0.95,
+        },
+    },
 ]
 
 RANDOM_AI_PROFILE = {

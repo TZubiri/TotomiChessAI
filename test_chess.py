@@ -453,11 +453,13 @@ def test_apply_random_ai_move_fails_without_legal_moves():
 
 def test_ai_profiles_and_minimax_selection():
     profiles = get_ai_profiles()
-    assert len(profiles) == 12
+    assert len(profiles) == 16
     assert sum(1 for profile in profiles if profile["plies"] == 0) == 1
     assert any(profile["plies"] == 3 for profile in profiles)
+    assert any(profile["plies"] == 4 for profile in profiles)
     assert any(profile["id"] == "d2_pawnwise" for profile in profiles)
     assert any(profile["id"] == "d2_pawnwise_control" for profile in profiles)
+    assert any(profile["id"] == "d3_pawnwise" for profile in profiles)
 
     board = Board()
     oracle_profile = next(profile for profile in profiles if profile["plies"] == 3 and profile["personality_name"] == "Classic")
@@ -639,8 +641,8 @@ def test_pawnwise_control_profile_no_selective_second_ply_pruning():
 
 def test_tournament_fixture_counts():
     profiles = get_ai_profiles()
-    assert len(build_fixtures(profiles, "ordered")) == 132
-    assert len(build_fixtures(profiles, "single")) == 66
+    assert len(build_fixtures(profiles, "ordered")) == 240
+    assert len(build_fixtures(profiles, "single")) == 120
 
 
 def test_tournament_writes_results_and_scoreboard():
@@ -656,7 +658,7 @@ def test_tournament_writes_results_and_scoreboard():
 
         output_root = Path(temp_dir)
         assert manifest["match_count"] == 1
-        assert len(rows) == 12
+        assert len(rows) == 16
         assert (output_root / "scoreboard.csv").exists()
         assert (output_root / "scoreboard.json").exists()
         assert (output_root / "manifest.json").exists()
