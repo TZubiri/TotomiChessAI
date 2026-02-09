@@ -40,6 +40,7 @@ from chess import (
     record_move,
     start_savefile,
 )
+from chess_uci import move_to_uci, parse_uci_position
 from run_tournament import build_fixtures, rank_rows_with_tiebreakers, run_tournament
 
 
@@ -878,6 +879,25 @@ def test_c_search_cache_handle_reused_across_turns():
         destroy_c_search_cache(cache_handle)
 
 
+def test_parse_uci_position_startpos_with_moves_tracks_turn():
+    board, active_color = parse_uci_position(["startpos", "moves", "e2e4", "e7e5", "g1f3"])
+
+    assert active_color == "black"
+    piece_e4 = board.get_piece_at((4, 3))
+    piece_e5 = board.get_piece_at((4, 4))
+    piece_f3 = board.get_piece_at((5, 2))
+    assert isinstance(piece_e4, Pawn) and piece_e4.color == "white"
+    assert isinstance(piece_e5, Pawn) and piece_e5.color == "black"
+    assert isinstance(piece_f3, Knight) and piece_f3.color == "white"
+
+
+def test_move_to_uci_adds_queen_promotion_suffix():
+    board = _empty_board()
+    _place(board, Pawn("white", (4, 6)))
+
+    assert move_to_uci(board, ((4, 6), (4, 7))) == "e7e8q"
+
+
 def run_all_tests():
     tests = [
         test_position_move_counts,
@@ -926,6 +946,8 @@ def run_all_tests():
         test_c_piece_evaluation_matches_python_when_available,
         test_c_search_returns_legal_move_when_available,
         test_c_search_cache_handle_reused_across_turns,
+        test_parse_uci_position_startpos_with_moves_tracks_turn,
+        test_move_to_uci_adds_queen_promotion_suffix,
     ]
 
     for test in tests:

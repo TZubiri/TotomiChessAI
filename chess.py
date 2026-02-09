@@ -4,7 +4,6 @@ import os
 import copy
 import random
 import ctypes
-import subprocess
 
 
 DEFAULT_SAVEFILE = "chess_save.pgn"
@@ -186,6 +185,36 @@ SPECIAL_AI_PROFILES = [
             6: 1.3,
             7: 1.5,
             8: 8.0,
+        },
+        "backward_pawn_value": 0.8,
+        "position_multipliers": {
+            "center": 1.3,
+            "center_cross": 1.2,
+            "center_diagonal": 1.15,
+            "corner": 0.8,
+            "corner_rook": 0.9,
+            "corner_touch": 0.85,
+            "corner_touch_rook": 0.95,
+        },
+    },
+    {
+        "id": "d5_pawnwise",
+        "name": "Grandmaster Pawnwise",
+        "plies": 5,
+        "personality_name": "Pawnwise",
+        "piece_values": {
+            "pawn": 1.0,
+            "knight": 3.3,
+            "bishop": 3.5,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 100,
+        },
+        "pawn_rank_values": {
+            5: 1.3,
+            6: 2.5,
+            7: 4,
+            8: 10,
         },
         "backward_pawn_value": 0.8,
         "position_multipliers": {
@@ -474,31 +503,18 @@ def _load_c_eval_function():
     global _C_DESTROY_SEARCH_CACHE_FUNCTION
 
     if _C_EVAL_ATTEMPTED:
+        if _C_EVAL_FUNCTION is None:
+            raise RuntimeError("Failed to load required C evaluator")
         return _C_EVAL_FUNCTION
 
     _C_EVAL_ATTEMPTED = True
-    if not os.path.exists(C_EVAL_SOURCE):
-        return None
-
-    needs_build = (
-        not os.path.exists(C_EVAL_LIBRARY)
-        or os.path.getmtime(C_EVAL_LIBRARY) < os.path.getmtime(C_EVAL_SOURCE)
-    )
-    if needs_build:
-        try:
-            subprocess.run(
-                ["gcc", "-O3", "-shared", "-fPIC", C_EVAL_SOURCE, "-o", C_EVAL_LIBRARY],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            return None
+    if not os.path.exists(C_EVAL_LIBRARY):
+        raise RuntimeError(f"Required C evaluator library not found: {C_EVAL_LIBRARY}")
 
     try:
         _C_EVAL_LIBRARY_HANDLE = ctypes.CDLL(C_EVAL_LIBRARY)
-    except OSError:
-        return None
+    except OSError as error:
+        raise RuntimeError(f"Failed to load required C evaluator library: {C_EVAL_LIBRARY}") from error
 
     _C_SEARCH_FUNCTION = None
     _C_CREATE_SEARCH_CACHE_FUNCTION = None
@@ -528,7 +544,10 @@ def _load_c_eval_function():
 
 
 def c_evaluator_available():
-    return _load_c_eval_function() is not None
+    try:
+        return _load_c_eval_function() is not None
+    except RuntimeError:
+        return False
 
 
 def _build_c_piece_arrays(board, include_moved=False):
@@ -611,13 +630,14 @@ def _load_c_search_function():
     if _C_SEARCH_FUNCTION is not None:
         return _C_SEARCH_FUNCTION
 
-    if _load_c_eval_function() is None or _C_EVAL_LIBRARY_HANDLE is None:
-        return None
+    _load_c_eval_function()
+    if _C_EVAL_LIBRARY_HANDLE is None:
+        raise RuntimeError("Required C evaluator library handle was not initialized")
 
     try:
         search_function = _C_EVAL_LIBRARY_HANDLE.choose_best_move_c
-    except AttributeError:
-        return None
+    except AttributeError as error:
+        raise RuntimeError("Required C search symbol choose_best_move_c is missing") from error
 
     search_function.argtypes = [
         ctypes.POINTER(ctypes.c_int),
@@ -655,7 +675,10 @@ def _load_c_search_function():
 
 
 def c_search_available():
-    return _load_c_search_function() is not None
+    try:
+        return _load_c_search_function() is not None
+    except RuntimeError:
+        return False
 
 
 def _load_c_search_cache_functions():
@@ -665,14 +688,15 @@ def _load_c_search_cache_functions():
     if _C_CREATE_SEARCH_CACHE_FUNCTION is not None and _C_DESTROY_SEARCH_CACHE_FUNCTION is not None:
         return _C_CREATE_SEARCH_CACHE_FUNCTION, _C_DESTROY_SEARCH_CACHE_FUNCTION
 
-    if _load_c_eval_function() is None or _C_EVAL_LIBRARY_HANDLE is None:
-        return None, None
+    _load_c_eval_function()
+    if _C_EVAL_LIBRARY_HANDLE is None:
+        raise RuntimeError("Required C evaluator library handle was not initialized")
 
     try:
         create_function = _C_EVAL_LIBRARY_HANDLE.create_search_cache_c
         destroy_function = _C_EVAL_LIBRARY_HANDLE.destroy_search_cache_c
-    except AttributeError:
-        return None, None
+    except AttributeError as error:
+        raise RuntimeError("Required C cache symbols are missing from evaluator library") from error
 
     create_function.argtypes = [ctypes.c_size_t]
     create_function.restype = ctypes.c_void_p
@@ -686,11 +710,9 @@ def _load_c_search_cache_functions():
 
 def create_c_search_cache(max_bytes=C_SEARCH_CACHE_MAX_BYTES):
     create_function, _ = _load_c_search_cache_functions()
-    if create_function is None:
-        return None
     cache_pointer = create_function(int(max_bytes))
     if not cache_pointer:
-        return None
+        raise RuntimeError("Failed to allocate required C search cache")
     return cache_pointer
 
 
@@ -720,14 +742,14 @@ def _choose_minimax_legal_move_c(
 
     search_function = _load_c_search_function()
     if search_function is None:
-        return None
+        raise RuntimeError("Required C search function is unavailable")
 
     piece_count, piece_type_array, piece_color_array, piece_col_array, piece_row_array, piece_moved_array = _build_c_piece_arrays(
         board,
         include_moved=True,
     )
     if piece_count <= 0:
-        return None
+        raise RuntimeError("Cannot run C search on an empty board")
 
     (
         piece_value_array,
@@ -784,12 +806,12 @@ def _choose_minimax_legal_move_c(
     )
 
     if result != 1:
-        return None
+        raise RuntimeError("C search failed to choose a move")
 
     from_pos = (out_from_col.value, out_from_row.value)
     to_pos = (out_to_col.value, out_to_row.value)
     if not board.is_legal_move(color, from_pos, to_pos):
-        return None
+        raise RuntimeError("C search returned an illegal move")
     return from_pos, to_pos
 
 
@@ -802,8 +824,6 @@ def _evaluate_position_scores_c_base(
     position_multipliers=None,
 ):
     evaluate_function = _load_c_eval_function()
-    if evaluate_function is None:
-        return None
 
     if not board.pieces:
         return 0.0, 0.0
@@ -845,7 +865,7 @@ def _evaluate_position_scores_c_base(
         ctypes.byref(heuristic_score),
     )
     if success != 1:
-        return None
+        raise RuntimeError("C evaluator failed to score position")
 
     return material_score.value, heuristic_score.value
 
@@ -1714,7 +1734,7 @@ def evaluate_position_scores(
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
 ):
-    c_scores = _evaluate_position_scores_c_base(
+    material_score, heuristic_score = _evaluate_position_scores_c_base(
         board,
         perspective_color,
         piece_values,
@@ -1722,17 +1742,6 @@ def evaluate_position_scores(
         backward_pawn_value=backward_pawn_value,
         position_multipliers=position_multipliers,
     )
-    if c_scores is None:
-        material_score, heuristic_score = _evaluate_position_scores_python_base(
-            board,
-            perspective_color,
-            piece_values,
-            pawn_rank_values=pawn_rank_values,
-            backward_pawn_value=backward_pawn_value,
-            position_multipliers=position_multipliers,
-        )
-    else:
-        material_score, heuristic_score = c_scores
 
     if control_weight:
         heuristic_score += control_weight * _control_score(
@@ -1885,35 +1894,7 @@ def choose_minimax_legal_move(
         opposite_bishop_draw_factor=opposite_bishop_draw_factor,
         search_cache_handle=search_cache_handle,
     )
-    if c_move is not None:
-        return c_move
-
-    next_color = board.get_opponent_color(color)
-    best_score = (float("-inf"), float("-inf"))
-    best_moves = []
-    for from_pos, to_pos in legal_moves:
-        simulation = board.clone()
-        simulation.move_piece(from_pos, to_pos)
-        score = minimax_score(
-            simulation,
-            next_color,
-            color,
-            plies - 1,
-            piece_values,
-            pawn_rank_values=pawn_rank_values,
-            backward_pawn_value=backward_pawn_value,
-            position_multipliers=position_multipliers,
-            control_weight=control_weight,
-            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
-        )
-        if score > best_score:
-            best_score = score
-            best_moves = [(from_pos, to_pos)]
-        elif score == best_score:
-            best_moves.append((from_pos, to_pos))
-
-    random_source = rng if rng is not None else random
-    return random_source.choice(best_moves)
+    return c_move
 
 
 def choose_ai_move(board, color, ai_profile, rng=None):
@@ -2149,6 +2130,7 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
 
 
 def play_cli(savefile_path=DEFAULT_SAVEFILE):
+    _load_c_search_function()
     while True:
         game_setup = configure_game_menu()
         if game_setup["mode"] == "quit":
