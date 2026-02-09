@@ -22,6 +22,7 @@ from chess import (
     choose_minimax_legal_move,
     choose_random_legal_move,
     c_evaluator_available,
+    c_search_available,
     convert_legacy_save_text_to_pgn,
     configure_game_menu,
     evaluate_material,
@@ -777,6 +778,18 @@ def test_c_piece_evaluation_matches_python_when_available():
     assert abs(c_scores[1] - python_scores[1]) < 1e-9
 
 
+def test_c_search_returns_legal_move_when_available():
+    if not c_search_available():
+        return
+
+    board = Board()
+    profiles = get_ai_profiles()
+    oracle_profile = next(profile for profile in profiles if profile["id"] == "d3_basic")
+
+    move = choose_ai_move(board, "white", oracle_profile, rng=random.Random(5))
+    assert move in board.get_legal_moves_for_color("white")
+
+
 def run_all_tests():
     tests = [
         test_position_move_counts,
@@ -822,6 +835,7 @@ def run_all_tests():
         test_move_text_to_algebraic_disambiguates_queen_by_file_and_rank,
         test_move_text_to_algebraic_uses_pawn_file_on_capture,
         test_c_piece_evaluation_matches_python_when_available,
+        test_c_search_returns_legal_move_when_available,
     ]
 
     for test in tests:

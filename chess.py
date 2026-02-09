@@ -23,6 +23,7 @@ C_EVAL_LIBRARY = os.path.join(os.path.dirname(__file__), "ai_eval.so")
 _C_EVAL_FUNCTION = None
 _C_EVAL_ATTEMPTED = False
 _C_EVAL_LIBRARY_HANDLE = None
+_C_SEARCH_FUNCTION = None
 
 AI_PERSONALITIES = [
     {
@@ -458,31 +459,23 @@ def c_evaluator_available():
     return _load_c_eval_function() is not None
 
 
-def _evaluate_position_scores_c_base(
-    board,
-    perspective_color,
-    piece_values,
-    pawn_rank_values=None,
-    backward_pawn_value=None,
-    position_multipliers=None,
-):
-    evaluate_function = _load_c_eval_function()
-    if evaluate_function is None:
-        return None
-
+def _build_c_piece_arrays(board, include_moved=False):
     if not board.pieces:
-        return 0.0, 0.0
+        return 0, None, None, None, None, None
 
     piece_types = []
     piece_colors = []
     piece_cols = []
     piece_rows = []
+    piece_moved = []
     for piece in board.pieces:
         piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
         piece_types.append(PIECE_INDEX_BY_TYPE[piece_type])
         piece_colors.append(0 if piece.color == "white" else 1)
         piece_cols.append(piece.position[0])
         piece_rows.append(piece.position[1])
+        if include_moved:
+            piece_moved.append(1 if piece.moved else 0)
 
     piece_count = len(piece_types)
     piece_type_array = (ctypes.c_int * piece_count)(*piece_types)
@@ -490,6 +483,14 @@ def _evaluate_position_scores_c_base(
     piece_col_array = (ctypes.c_int * piece_count)(*piece_cols)
     piece_row_array = (ctypes.c_int * piece_count)(*piece_rows)
 
+    piece_moved_array = None
+    if include_moved:
+        piece_moved_array = (ctypes.c_int * piece_count)(*piece_moved)
+
+    return piece_count, piece_type_array, piece_color_array, piece_col_array, piece_row_array, piece_moved_array
+
+
+def _build_c_eval_arrays(piece_values, pawn_rank_values=None, backward_pawn_value=None, position_multipliers=None):
     ordered_piece_values = [float(piece_values[piece_type]) for piece_type in PIECE_ORDER]
     piece_value_array = (ctypes.c_double * len(PIECE_ORDER))(*ordered_piece_values)
 
@@ -520,6 +521,188 @@ def _evaluate_position_scores_c_base(
     else:
         position_entries = [1.0] * 7
     position_array = (ctypes.c_double * 7)(*position_entries)
+
+    return (
+        piece_value_array,
+        pawn_rank_array,
+        has_pawn_rank_values,
+        backward_pawn_entry,
+        has_backward_pawn_value,
+        position_array,
+        has_position_multipliers,
+    )
+
+
+def _load_c_search_function():
+    global _C_SEARCH_FUNCTION
+
+    if _C_SEARCH_FUNCTION is not None:
+        return _C_SEARCH_FUNCTION
+
+    if _load_c_eval_function() is None or _C_EVAL_LIBRARY_HANDLE is None:
+        return None
+
+    try:
+        search_function = _C_EVAL_LIBRARY_HANDLE.choose_best_move_c
+    except AttributeError:
+        return None
+
+    search_function.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int,
+        ctypes.c_double,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_double),
+        ctypes.c_int,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    search_function.restype = ctypes.c_int
+    _C_SEARCH_FUNCTION = search_function
+    return _C_SEARCH_FUNCTION
+
+
+def c_search_available():
+    return _load_c_search_function() is not None
+
+
+def _choose_minimax_legal_move_c(
+    board,
+    color,
+    plies,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+):
+    if plies <= 0:
+        return None
+
+    search_function = _load_c_search_function()
+    if search_function is None:
+        return None
+
+    piece_count, piece_type_array, piece_color_array, piece_col_array, piece_row_array, piece_moved_array = _build_c_piece_arrays(
+        board,
+        include_moved=True,
+    )
+    if piece_count <= 0:
+        return None
+
+    (
+        piece_value_array,
+        pawn_rank_array,
+        has_pawn_rank_values,
+        backward_pawn_entry,
+        has_backward_pawn_value,
+        position_array,
+        has_position_multipliers,
+    ) = _build_c_eval_arrays(
+        piece_values,
+        pawn_rank_values=pawn_rank_values,
+        backward_pawn_value=backward_pawn_value,
+        position_multipliers=position_multipliers,
+    )
+
+    en_passant_target_col, en_passant_target_row = board.en_passant_target or (-1, -1)
+    en_passant_capture_col, en_passant_capture_row = board.en_passant_capture_position or (-1, -1)
+
+    out_from_col = ctypes.c_int()
+    out_from_row = ctypes.c_int()
+    out_to_col = ctypes.c_int()
+    out_to_row = ctypes.c_int()
+
+    result = search_function(
+        piece_type_array,
+        piece_color_array,
+        piece_col_array,
+        piece_row_array,
+        piece_moved_array,
+        piece_count,
+        0 if color == "white" else 1,
+        plies,
+        piece_value_array,
+        pawn_rank_array,
+        has_pawn_rank_values,
+        backward_pawn_entry,
+        has_backward_pawn_value,
+        position_array,
+        has_position_multipliers,
+        float(control_weight),
+        float(opposite_bishop_draw_factor if opposite_bishop_draw_factor is not None else 1.0),
+        1 if opposite_bishop_draw_factor is not None else 0,
+        en_passant_target_col,
+        en_passant_target_row,
+        en_passant_capture_col,
+        en_passant_capture_row,
+        int(board.halfmove_clock),
+        ctypes.byref(out_from_col),
+        ctypes.byref(out_from_row),
+        ctypes.byref(out_to_col),
+        ctypes.byref(out_to_row),
+    )
+
+    if result != 1:
+        return None
+
+    from_pos = (out_from_col.value, out_from_row.value)
+    to_pos = (out_to_col.value, out_to_row.value)
+    if not board.is_legal_move(color, from_pos, to_pos):
+        return None
+    return from_pos, to_pos
+
+
+def _evaluate_position_scores_c_base(
+    board,
+    perspective_color,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+):
+    evaluate_function = _load_c_eval_function()
+    if evaluate_function is None:
+        return None
+
+    if not board.pieces:
+        return 0.0, 0.0
+
+    piece_count, piece_type_array, piece_color_array, piece_col_array, piece_row_array, _ = _build_c_piece_arrays(board)
+    (
+        piece_value_array,
+        pawn_rank_array,
+        has_pawn_rank_values,
+        backward_pawn_entry,
+        has_backward_pawn_value,
+        position_array,
+        has_position_multipliers,
+    ) = _build_c_eval_arrays(
+        piece_values,
+        pawn_rank_values=pawn_rank_values,
+        backward_pawn_value=backward_pawn_value,
+        position_multipliers=position_multipliers,
+    )
 
     material_score = ctypes.c_double()
     heuristic_score = ctypes.c_double()
@@ -1568,6 +1751,20 @@ def choose_minimax_legal_move(
 
     if plies <= 0:
         return choose_random_legal_move(board, color, rng=rng)
+
+    c_move = _choose_minimax_legal_move_c(
+        board,
+        color,
+        plies,
+        piece_values,
+        pawn_rank_values=pawn_rank_values,
+        backward_pawn_value=backward_pawn_value,
+        position_multipliers=position_multipliers,
+        control_weight=control_weight,
+        opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+    )
+    if c_move is not None:
+        return c_move
 
     next_color = board.get_opponent_color(color)
     best_score = (float("-inf"), float("-inf"))
