@@ -709,6 +709,41 @@ def test_move_text_to_algebraic_converts_coordinate_notation():
     assert move_text_to_algebraic(board, "black", "g8f6") == "Nf6"
 
 
+def test_move_text_to_algebraic_disambiguates_knight_by_file():
+    board = _empty_board()
+    _place(board, Knight("white", (2, 2)))
+    _place(board, Knight("white", (4, 2)))
+
+    assert move_text_to_algebraic(board, "white", "c3d5") == "Ncd5"
+    assert move_text_to_algebraic(board, "white", "e3d5") == "Ned5"
+
+
+def test_move_text_to_algebraic_disambiguates_rook_by_rank():
+    board = _empty_board()
+    _place(board, Rook("white", (0, 0)))
+    _place(board, Rook("white", (0, 6)))
+
+    assert move_text_to_algebraic(board, "white", "a1a4") == "R1a4"
+    assert move_text_to_algebraic(board, "white", "a7a4") == "R7a4"
+
+
+def test_move_text_to_algebraic_disambiguates_queen_by_file_and_rank():
+    board = _empty_board()
+    _place(board, Queen("white", (0, 0)))
+    _place(board, Queen("white", (0, 4)))
+    _place(board, Queen("white", (4, 0)))
+
+    assert move_text_to_algebraic(board, "white", "a1e5") == "Qa1e5"
+
+
+def test_move_text_to_algebraic_uses_pawn_file_on_capture():
+    board = _empty_board()
+    _place(board, Pawn("white", (4, 3)))
+    _place(board, Pawn("black", (5, 4)))
+
+    assert move_text_to_algebraic(board, "white", "e4f5") == "exf5"
+
+
 def run_all_tests():
     tests = [
         test_position_move_counts,
@@ -749,6 +784,10 @@ def run_all_tests():
         test_savefile_records_moves,
         test_convert_legacy_save_text_to_pgn,
         test_move_text_to_algebraic_converts_coordinate_notation,
+        test_move_text_to_algebraic_disambiguates_knight_by_file,
+        test_move_text_to_algebraic_disambiguates_rook_by_rank,
+        test_move_text_to_algebraic_disambiguates_queen_by_file_and_rank,
+        test_move_text_to_algebraic_uses_pawn_file_on_capture,
     ]
 
     for test in tests:

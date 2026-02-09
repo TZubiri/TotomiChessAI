@@ -242,6 +242,35 @@ def _piece_letter_for_algebraic(piece):
     return ""
 
 
+def _disambiguation_for_piece_move(board, piece, to_position):
+    competing_pieces = []
+    for candidate in board.pieces:
+        if candidate is piece:
+            continue
+        if candidate.color != piece.color:
+            continue
+        if candidate.__class__ is not piece.__class__:
+            continue
+        if board.is_legal_move(piece.color, candidate.position, to_position):
+            competing_pieces.append(candidate)
+
+    if not competing_pieces:
+        return ""
+
+    from_col, from_row = piece.position
+    shares_file = any(candidate.position[0] == from_col for candidate in competing_pieces)
+    shares_rank = any(candidate.position[1] == from_row for candidate in competing_pieces)
+
+    file_text = chr(ord("a") + from_col)
+    rank_text = str(from_row + 1)
+
+    if not shares_file:
+        return file_text
+    if not shares_rank:
+        return rank_text
+    return f"{file_text}{rank_text}"
+
+
 def _resolve_coordinate_move_details(board, color, move_text):
     parsed_move = parse_coordinate_move(move_text)
     from_position = square_to_position(parsed_move["from_square"])
@@ -339,8 +368,9 @@ def move_text_to_algebraic(board, color, move_text):
         return f"{prefix}{destination}{promotion_suffix}"
 
     piece_letter = _piece_letter_for_algebraic(piece)
+    disambiguation = _disambiguation_for_piece_move(board, piece, to_position)
     capture_marker = "x" if is_capture else ""
-    return f"{piece_letter}{capture_marker}{destination}"
+    return f"{piece_letter}{disambiguation}{capture_marker}{destination}"
 
 
 def get_ai_profiles():
