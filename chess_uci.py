@@ -3,16 +3,20 @@ import os
 import sys
 
 from chess import (
+    DEFAULT_SAVEFILE,
     Board,
     King,
     Pawn,
+    SavefileRecorder,
     apply_coordinate_move,
     choose_ai_move,
     create_c_search_cache,
     destroy_c_search_cache,
     evaluate_material,
     get_ai_profiles,
+    get_game_status,
     position_to_square,
+    set_savefile_recorder,
     square_to_position,
 )
 
@@ -143,37 +147,53 @@ def board_from_fen(fen_text):
     return board, side_to_move
 
 
-def parse_uci_position(position_tokens):
+def _extract_position_move_tokens(position_tokens):
     if not position_tokens:
         raise ValueError("position command is missing arguments")
 
-    move_tokens = []
     if position_tokens[0] == "startpos":
-        board = Board()
-        active_color = "white"
-        index = 1
-    elif position_tokens[0] == "fen":
+        if len(position_tokens) > 1:
+            if position_tokens[1] != "moves":
+                raise ValueError("Expected 'moves' after 'startpos'")
+            return position_tokens[2:]
+        return []
+
+    if position_tokens[0] == "fen":
         if len(position_tokens) < 5:
             raise ValueError("position fen command is incomplete")
         try:
             moves_index = position_tokens.index("moves")
+            return position_tokens[moves_index + 1 :]
+        except ValueError:
+            return []
+
+    raise ValueError(f"Unsupported position source: {position_tokens[0]}")
+
+
+def parse_uci_position(position_tokens, savefile_recorder=None, record_from_move_index=0):
+    if not position_tokens:
+        raise ValueError("position command is missing arguments")
+
+    move_tokens = _extract_position_move_tokens(position_tokens)
+    if position_tokens[0] == "startpos":
+        board = Board()
+        active_color = "white"
+    elif position_tokens[0] == "fen":
+        try:
+            moves_index = position_tokens.index("moves")
             fen_tokens = position_tokens[1:moves_index]
-            move_tokens = position_tokens[moves_index + 1 :]
         except ValueError:
             fen_tokens = position_tokens[1:]
-            move_tokens = []
         board, active_color = board_from_fen(" ".join(fen_tokens))
-        index = len(position_tokens)
     else:
         raise ValueError(f"Unsupported position source: {position_tokens[0]}")
 
-    if position_tokens[0] == "startpos" and index < len(position_tokens):
-        if position_tokens[index] != "moves":
-            raise ValueError("Expected 'moves' after 'startpos'")
-        move_tokens = position_tokens[index + 1 :]
+    if savefile_recorder is not None:
+        set_savefile_recorder(board, savefile_recorder)
 
-    for move_text in move_tokens:
-        apply_coordinate_move(board, active_color, move_text)
+    for move_index, move_text in enumerate(move_tokens):
+        should_record = move_index >= record_from_move_index
+        apply_coordinate_move(board, active_color, move_text, record=should_record)
         active_color = _opponent(active_color)
 
     return board, active_color
@@ -259,6 +279,9 @@ class UCIEngine:
         self.search_cache_handle = None
         self.board = Board()
         self.active_color = "white"
+        self.savefile_recorder = SavefileRecorder(os.environ.get("CHESS_UCI_SAVEFILE", DEFAULT_SAVEFILE))
+        self.position_move_tokens = []
+        set_savefile_recorder(self.board, self.savefile_recorder)
 
     def _send(self, line):
         sys.stdout.write(f"{line}\n")
@@ -274,6 +297,22 @@ class UCIEngine:
     def _ensure_cache(self):
         if self.search_cache_handle is None:
             self._reset_cache()
+
+    def _status_for_recording_end(self, fallback_reason):
+        status = get_game_status(self.board, self.active_color)
+        if status["state"] == "in_progress":
+            return {"state": "aborted", "reason": fallback_reason, "winner": None}
+        return status
+
+    def _finalize_current_recording(self, fallback_reason):
+        if not self.savefile_recorder.has_moves():
+            return
+        self.savefile_recorder.finalize(self._status_for_recording_end(fallback_reason))
+
+    def _start_new_recording(self):
+        self.savefile_recorder.prepare_new_game()
+        self.position_move_tokens = []
+        set_savefile_recorder(self.board, self.savefile_recorder)
 
     def _handle_uci(self):
         self._send(f"id name {ENGINE_NAME}")
@@ -366,13 +405,36 @@ class UCIEngine:
                     self._send("readyok")
                     continue
                 if line == "ucinewgame":
+                    self._finalize_current_recording("ucinewgame")
                     self.board = Board()
                     self.active_color = "white"
+                    self._start_new_recording()
                     self._reset_cache()
                     continue
                 if line.startswith("position "):
                     try:
-                        self.board, self.active_color = parse_uci_position(line.split()[1:])
+                        position_tokens = line.split()[1:]
+                        move_tokens = _extract_position_move_tokens(position_tokens)
+                        if self.savefile_recorder.finalized:
+                            self._start_new_recording()
+
+                        if move_tokens[: len(self.position_move_tokens)] == self.position_move_tokens:
+                            record_from_move_index = len(self.position_move_tokens)
+                        else:
+                            self._finalize_current_recording("position_reset")
+                            self._start_new_recording()
+                            record_from_move_index = 0
+
+                        self.board, self.active_color = parse_uci_position(
+                            position_tokens,
+                            savefile_recorder=self.savefile_recorder,
+                            record_from_move_index=record_from_move_index,
+                        )
+                        self.position_move_tokens = move_tokens
+
+                        terminal_status = get_game_status(self.board, self.active_color)
+                        if terminal_status["state"] != "in_progress":
+                            self.savefile_recorder.finalize(terminal_status)
                     except ValueError as error:
                         self._send(f"info string position parse error: {error}")
                     continue
@@ -387,6 +449,7 @@ class UCIEngine:
                 if line in ("quit", "exit"):
                     break
         finally:
+            self._finalize_current_recording("quit")
             if self.search_cache_handle is not None:
                 destroy_c_search_cache(self.search_cache_handle)
 

@@ -13,6 +13,7 @@ from chess import (
     Pawn,
     Queen,
     Rook,
+    SavefileRecorder,
     apply_algebraic_move,
     apply_ai_move,
     apply_coordinate_move,
@@ -38,6 +39,7 @@ from chess import (
     parse_coordinate_move,
     position_to_square,
     record_move,
+    set_savefile_recorder,
     start_savefile,
 )
 from chess_uci import move_to_uci, parse_uci_position
@@ -737,6 +739,44 @@ def test_savefile_records_moves():
     assert lines[9] == "1. e4 e5 1/2-1/2"
 
 
+def test_apply_user_move_records_with_attached_savefile_recorder():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        savefile_path = f"{temp_dir}/moves.pgn"
+        board = Board()
+        savefile_recorder = SavefileRecorder(savefile_path)
+        savefile_recorder.start_new_game()
+        set_savefile_recorder(board, savefile_recorder)
+
+        apply_user_move(board, "white", "e4")
+        apply_user_move(board, "black", "e5")
+        savefile_recorder.finalize({"state": "draw", "reason": "stalemate", "winner": None})
+
+        with open(savefile_path, "r", encoding="utf-8") as savefile:
+            lines = [line.rstrip("\n") for line in savefile]
+
+    assert lines[9] == "1. e4 e5 1/2-1/2"
+
+
+def test_parse_uci_position_record_from_move_index_skips_existing_moves():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        savefile_path = f"{temp_dir}/moves.pgn"
+        savefile_recorder = SavefileRecorder(savefile_path)
+        savefile_recorder.start_new_game()
+
+        parse_uci_position(["startpos", "moves", "e2e4", "e7e5"], savefile_recorder=savefile_recorder)
+        parse_uci_position(
+            ["startpos", "moves", "e2e4", "e7e5", "g1f3"],
+            savefile_recorder=savefile_recorder,
+            record_from_move_index=2,
+        )
+        savefile_recorder.finalize({"state": "draw", "reason": "stalemate", "winner": None})
+
+        with open(savefile_path, "r", encoding="utf-8") as savefile:
+            lines = [line.rstrip("\n") for line in savefile]
+
+    assert lines[9] == "1. e4 e5 2. Nf3 1/2-1/2"
+
+
 def test_convert_legacy_save_text_to_pgn():
     legacy_text = "\n".join(
         [
@@ -937,6 +977,8 @@ def run_all_tests():
         test_tournament_tiebreaker_prefers_head_to_head_for_champion_tie,
         test_tournament_writes_results_and_scoreboard,
         test_savefile_records_moves,
+        test_apply_user_move_records_with_attached_savefile_recorder,
+        test_parse_uci_position_record_from_move_index_skips_existing_moves,
         test_convert_legacy_save_text_to_pgn,
         test_move_text_to_algebraic_converts_coordinate_notation,
         test_move_text_to_algebraic_disambiguates_knight_by_file,

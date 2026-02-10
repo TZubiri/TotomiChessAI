@@ -6,3 +6,4 @@ tournament_results/
 game.txt
 game.pgn
 ai_eval.so
+lichess-bot

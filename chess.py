@@ -945,6 +945,63 @@ def finalize_savefile(savefile_path, status):
         savefile.write(f"{result}\n\n")
 
 
+class SavefileRecorder:
+    def __init__(self, savefile_path=DEFAULT_SAVEFILE):
+        self.savefile_path = savefile_path
+        self.move_number = 1
+        self.started = False
+        self.finalized = False
+
+    def prepare_new_game(self):
+        self.move_number = 1
+        self.started = False
+        self.finalized = False
+
+    def start_new_game(self):
+        start_savefile(self.savefile_path)
+        self.move_number = 1
+        self.started = True
+        self.finalized = False
+
+    def record_algebraic_move(self, color, move_text):
+        if not self.started or self.finalized:
+            self.start_new_game()
+        record_move(self.savefile_path, self.move_number, color, move_text)
+        self.move_number += 1
+
+    def has_moves(self):
+        return self.move_number > 1
+
+    def finalize(self, status):
+        if not self.started or self.finalized:
+            return
+        finalize_savefile(self.savefile_path, status)
+        self.finalized = True
+
+
+def set_savefile_recorder(board, savefile_recorder):
+    board.savefile_recorder = savefile_recorder
+
+
+def get_savefile_recorder(board):
+    return getattr(board, "savefile_recorder", None)
+
+
+def finalize_recorded_game(board, status):
+    savefile_recorder = get_savefile_recorder(board)
+    if savefile_recorder is None:
+        return
+    savefile_recorder.finalize(status)
+
+
+def _record_board_move(board, color, normalized_move):
+    savefile_recorder = get_savefile_recorder(board)
+    if savefile_recorder is None:
+        return
+    algebraic_move = move_text_to_algebraic(board, color, normalized_move)
+    savefile_recorder.record_algebraic_move(color, algebraic_move)
+
+
 def _parse_legacy_savefile_games(save_text):
     games = []
     current_game = None
@@ -1490,8 +1547,10 @@ class Board:
         return board_str
 
 
-def apply_coordinate_move(board, color, move_text):
+def apply_coordinate_move(board, color, move_text, record=True):
     from_position, to_position, promotion_choice, normalized_move = _resolve_coordinate_move_details(board, color, move_text)
+    if record:
+        _record_board_move(board, color, normalized_move)
     board.move_piece(from_position, to_position, promotion_piece=promotion_choice)
     return board.get_piece_at(to_position), to_position, normalized_move
 
@@ -1522,21 +1581,23 @@ def _resolve_promotion_choice(piece, to_position, promotion_piece):
     return None
 
 
-def apply_algebraic_move(board, color, move_text):
+def apply_algebraic_move(board, color, move_text, record=True):
     from_position, to_position, promotion_choice, normalized_move = _resolve_algebraic_move_details(board, color, move_text)
+    if record:
+        _record_board_move(board, color, normalized_move)
     board.move_piece(from_position, to_position, promotion_piece=promotion_choice)
     return board.get_piece_at(to_position), to_position, normalized_move
 
 
-def apply_user_move(board, color, move_text):
+def apply_user_move(board, color, move_text, record=True):
     try:
         parse_coordinate_move(move_text)
-        return apply_coordinate_move(board, color, move_text)
+        return apply_coordinate_move(board, color, move_text, record=record)
     except ValueError as coordinate_error:
         if "Invalid move format" not in str(coordinate_error):
             raise
 
-    return apply_algebraic_move(board, color, move_text)
+    return apply_algebraic_move(board, color, move_text, record=record)
 
 
 def has_legal_move(board, color):
@@ -1915,7 +1976,7 @@ def choose_ai_move(board, color, ai_profile, rng=None):
     )
 
 
-def apply_ai_move(board, color, ai_profile, rng=None, search_cache_handle=None):
+def apply_ai_move(board, color, ai_profile, rng=None, search_cache_handle=None, record=True):
     effective_profile = ai_profile
     if search_cache_handle is not None:
         effective_profile = dict(ai_profile)
@@ -1926,9 +1987,11 @@ def apply_ai_move(board, color, ai_profile, rng=None, search_cache_handle=None):
         raise ValueError(f"No legal moves available for {color}")
 
     from_pos, to_pos = chosen_move
+    move_text = f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
+    if record:
+        _record_board_move(board, color, move_text)
     board.move_piece(from_pos, to_pos)
     piece = board.get_piece_at(to_pos)
-    move_text = f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
     return piece, from_pos, to_pos, move_text
 
 
@@ -2035,9 +2098,11 @@ def _destroy_match_ai_caches(ai_caches):
 
 def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=True):
     board = Board()
+    savefile_recorder = SavefileRecorder(savefile_path)
+    savefile_recorder.start_new_game()
+    set_savefile_recorder(board, savefile_recorder)
     current_turn = "white"
     move_number = 1
-    start_savefile(savefile_path)
     ai_caches = _create_match_ai_caches(game_setup)
 
     fast_mode = game_setup["mode"] == "ai_vs_ai"
@@ -2058,20 +2123,17 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
                     print(_match_result_message(status))
                 else:
                     print(_match_result_message(status))
-                finalize_savefile(savefile_path, status)
+                finalize_recorded_game(board, status)
                 return status
 
             if game_setup["mode"] == "ai_vs_ai":
                 ai_profile = game_setup[f"{current_turn}_ai_profile"]
-                board_before_move = board.clone()
                 piece, _, to_position, normalized_move = apply_ai_move(
                     board,
                     current_turn,
                     ai_profile,
                     search_cache_handle=ai_caches.get(current_turn),
                 )
-                algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
-                record_move(savefile_path, move_number, current_turn, algebraic_move)
                 if ai_vs_ai_show_board:
                     print(f"{move_number}. {current_turn} {normalized_move} ({piece.__class__.__name__} -> {position_to_square(to_position)})")
                     print(board)
@@ -2081,15 +2143,12 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
                 continue
 
             if game_setup["mode"] == "vs_ai" and current_turn == game_setup["ai_color"]:
-                board_before_move = board.clone()
                 piece, _, to_position, normalized_move = apply_ai_move(
                     board,
                     current_turn,
                     game_setup["ai_profile"],
                     search_cache_handle=ai_caches.get(current_turn),
                 )
-                algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
-                record_move(savefile_path, move_number, current_turn, algebraic_move)
                 move_number += 1
                 print(f"AI moved {piece.__class__.__name__} to {position_to_square(to_position)}")
                 current_turn = board.get_opponent_color(current_turn)
@@ -2099,15 +2158,12 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
             if move_text.lower() in {"quit", "exit"}:
                 print("Returning to menu")
                 status = {"state": "aborted", "reason": "quit", "winner": None}
-                finalize_savefile(savefile_path, status)
+                finalize_recorded_game(board, status)
                 return status
 
             if move_text.lower() == "ai":
                 try:
-                    board_before_move = board.clone()
                     piece, _, to_position, normalized_move = apply_random_ai_move(board, current_turn)
-                    algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
-                    record_move(savefile_path, move_number, current_turn, algebraic_move)
                     move_number += 1
                     print(f"AI moved {piece.__class__.__name__} to {position_to_square(to_position)}")
                     current_turn = board.get_opponent_color(current_turn)
@@ -2116,10 +2172,7 @@ def play_match(game_setup, savefile_path=DEFAULT_SAVEFILE, ai_vs_ai_show_board=T
                 continue
 
             try:
-                board_before_move = board.clone()
                 piece, to_position, normalized_move = apply_user_move(board, current_turn, move_text)
-                algebraic_move = move_text_to_algebraic(board_before_move, current_turn, normalized_move)
-                record_move(savefile_path, move_number, current_turn, algebraic_move)
                 move_number += 1
                 print(f"Moved {piece.__class__.__name__} to {position_to_square(to_position)}")
                 current_turn = board.get_opponent_color(current_turn)
