@@ -647,8 +647,9 @@ def test_pawnwise_control_profile_no_selective_second_ply_pruning():
 
 def test_tournament_fixture_counts():
     profiles = get_ai_profiles()
-    assert len(build_fixtures(profiles, "ordered")) == 380
-    assert len(build_fixtures(profiles, "single")) == 190
+    profile_count = len(profiles)
+    assert len(build_fixtures(profiles, "ordered")) == profile_count * (profile_count - 1)
+    assert len(build_fixtures(profiles, "single")) == profile_count * (profile_count - 1) // 2
 
 
 def test_tournament_tiebreaker_prefers_head_to_head_for_champion_tie():
