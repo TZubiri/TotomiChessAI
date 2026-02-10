@@ -711,7 +711,7 @@ def test_tournament_writes_results_and_scoreboard():
 
         output_root = Path(temp_dir)
         assert manifest["match_count"] == 1
-        assert len(rows) == 20
+        assert len(rows) == manifest["player_count"]
         assert (output_root / "scoreboard.csv").exists()
         assert (output_root / "scoreboard.json").exists()
         assert (output_root / "manifest.json").exists()
