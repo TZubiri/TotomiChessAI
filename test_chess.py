@@ -1054,7 +1054,11 @@ def test_uci_go_reports_multipv_lines_when_enabled():
     )
     output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
-    multipv_lines = [line for line in output_lines if line.startswith("info depth 1 multipv ")]
+    multipv_lines = [
+        line
+        for line in output_lines
+        if line.startswith("info depth 1 ") and " multipv " in line and " pv " in line
+    ]
     assert len(multipv_lines) >= 3
     assert any(" multipv 1 " in line and " pv " in line for line in multipv_lines)
     assert any(" multipv 2 " in line and " pv " in line for line in multipv_lines)
@@ -1062,7 +1066,7 @@ def test_uci_go_reports_multipv_lines_when_enabled():
     assert any(line.startswith("bestmove ") for line in output_lines)
 
 
-def test_uci_go_depth_two_with_multipv_three_emits_nine_terminal_lines():
+def test_uci_go_depth_two_with_multipv_three_emits_depth_updates():
     if not c_search_available():
         return
 
@@ -1083,9 +1087,13 @@ def test_uci_go_depth_two_with_multipv_three_emits_nine_terminal_lines():
         check=True,
     )
     output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-    multipv_lines = [line for line in output_lines if line.startswith("info depth 2 multipv ") and " pv " in line]
+    depth_one = [line for line in output_lines if line.startswith("info depth 1 ") and " multipv " in line and " pv " in line]
+    depth_two = [line for line in output_lines if line.startswith("info depth 2 ") and " multipv " in line and " pv " in line]
+    info_string_two = [line for line in output_lines if line.startswith("info string depth 2 multipv ")]
 
-    assert len(multipv_lines) == 9
+    assert len(depth_one) == 3
+    assert len(depth_two) == 3
+    assert len(info_string_two) == 3
     assert any(line.startswith("bestmove ") for line in output_lines)
 
 
@@ -1210,7 +1218,7 @@ def run_all_tests():
         test_uci_go_reports_score_info_line,
         test_uci_eval_reports_score_without_bestmove,
         test_uci_go_reports_multipv_lines_when_enabled,
-        test_uci_go_depth_two_with_multipv_three_emits_nine_terminal_lines,
+        test_uci_go_depth_two_with_multipv_three_emits_depth_updates,
         test_uci_terminal_lines_outputs_full_width_tree,
         test_uci_proxy_logs_bidirectional_traffic,
         test_move_to_uci_adds_queen_promotion_suffix,

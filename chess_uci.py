@@ -23,7 +23,6 @@ from chess import (
 
 ENGINE_NAME = "OpenCode Chess UCI"
 ENGINE_AUTHOR = "OpenCode"
-MAX_GO_TERMINAL_LINES = 5000
 
 
 def _opponent(color):
@@ -305,6 +304,30 @@ def _rank_standard_legal_moves(board, color, profile):
     return scored_moves
 
 
+def _build_pv_for_root(board, color, profile, root_move, depth):
+    simulation = board.clone()
+    pv_moves = []
+
+    simulation.move_piece(root_move[0], root_move[1])
+    pv_moves.append(move_to_uci(board, root_move))
+
+    next_color = _opponent(color)
+    remaining_plies = depth - 1
+    while remaining_plies > 0:
+        ranked_moves = _rank_standard_legal_moves(simulation, next_color, profile)
+        if not ranked_moves:
+            break
+        next_move = ranked_moves[0][1]
+        pv_moves.append(move_to_uci(simulation, next_move))
+        simulation.move_piece(next_move[0], next_move[1])
+        next_color = _opponent(next_color)
+        remaining_plies -= 1
+
+    material_score, material_cp, tiebreaker, _ = _score_position_components(simulation, color, profile)
+    encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+    return encoded_cp, pv_moves, material_score, material_cp, tiebreaker
+
+
 def _collect_terminal_lines(board, color, profile, remaining_plies, width, pv_prefix, output, line_limit=None):
     if line_limit is not None and len(output) >= line_limit:
         return
@@ -473,24 +496,26 @@ class UCIEngine:
 
         profile["plies"] = search_depth
 
-        if self.multipv > 1:
-            terminal_lines = []
-            _collect_terminal_lines(
-                self.board,
-                self.active_color,
-                profile,
-                search_depth,
-                self.multipv,
-                [],
-                terminal_lines,
-                line_limit=MAX_GO_TERMINAL_LINES,
-            )
-            for index, (encoded_cp, pv_moves) in enumerate(terminal_lines, start=1):
-                self._send(
-                    f"info depth {search_depth} multipv {index} score cp {encoded_cp} pv {' '.join(pv_moves)}"
+        for current_depth in range(1, search_depth + 1):
+            ranked_root_moves = _rank_standard_legal_moves(self.board, self.active_color, profile)
+            if not ranked_root_moves:
+                break
+            for pv_index, (_, root_move, _) in enumerate(ranked_root_moves[: self.multipv], start=1):
+                encoded_cp, pv_moves, material_score, material_cp, tiebreaker = _build_pv_for_root(
+                    self.board,
+                    self.active_color,
+                    profile,
+                    root_move,
+                    current_depth,
                 )
-            if len(terminal_lines) >= MAX_GO_TERMINAL_LINES:
-                self._send(f"info string multipv lines capped at {MAX_GO_TERMINAL_LINES}")
+                self._send(
+                    f"info depth {current_depth} seldepth {current_depth} nodes {len(ranked_root_moves)} "
+                    f"score cp {encoded_cp} multipv {pv_index} pv {' '.join(pv_moves)}"
+                )
+                self._send(
+                    f"info string depth {current_depth} multipv {pv_index} eval main_pawns {material_score:+.2f} "
+                    f"main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
+                )
 
         chosen_move = choose_ai_move(self.board, self.active_color, profile)
         if chosen_move is not None and _is_standard_legal_move(self.board, self.active_color, chosen_move):
