@@ -1062,6 +1062,92 @@ def test_uci_go_reports_multipv_lines_when_enabled():
     assert any(line.startswith("bestmove ") for line in output_lines)
 
 
+def test_uci_go_depth_two_with_multipv_three_emits_nine_terminal_lines():
+    if not c_search_available():
+        return
+
+    command = ["python3", "chess_uci.py", "d2_basic"]
+    uci_input = (
+        "uci\n"
+        "isready\n"
+        "setoption name MultiPV value 3\n"
+        "position startpos\n"
+        "go depth 2\n"
+        "quit\n"
+    )
+    completed = subprocess.run(
+        command,
+        input=uci_input,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+    multipv_lines = [line for line in output_lines if line.startswith("info depth 2 multipv ") and " pv " in line]
+
+    assert len(multipv_lines) == 9
+    assert any(line.startswith("bestmove ") for line in output_lines)
+
+
+def test_uci_terminal_lines_outputs_full_width_tree():
+    command = ["python3", "chess_uci.py", "d2_basic"]
+    uci_input = "uci\nisready\nposition startpos\nterminal_lines depth 2 width 3\nquit\n"
+    completed = subprocess.run(
+        command,
+        input=uci_input,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+    terminal_rows = [line for line in output_lines if line.startswith("info depth 2 multipv ") and " pv " in line]
+    assert len(terminal_rows) == 9
+    assert any(line == "info string terminal_lines 9" for line in output_lines)
+
+
+def test_uci_proxy_logs_bidirectional_traffic():
+    log_path = Path(".tmp_uci_proxy_test.log")
+    command = [
+        "python3",
+        "uci_proxy.py",
+        "--log",
+        str(log_path),
+        "--",
+        "python3",
+        "-u",
+        "-c",
+        (
+            "import sys\n"
+            "for raw in sys.stdin:\n"
+            "    text = raw.strip()\n"
+            "    print(text.upper(), flush=True)\n"
+            "    if text == 'quit':\n"
+            "        break\n"
+        ),
+    ]
+
+    try:
+        completed = subprocess.run(
+            command,
+            input="uci\nquit\n",
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert "UCI" in completed.stdout
+        assert "QUIT" in completed.stdout
+
+        log_text = log_path.read_text(encoding="utf-8")
+        assert ">> uci" in log_text
+        assert ">> quit" in log_text
+        assert "<< UCI" in log_text
+        assert "<< QUIT" in log_text
+    finally:
+        if log_path.exists():
+            log_path.unlink()
+
+
 def test_move_to_uci_adds_queen_promotion_suffix():
     board = _empty_board()
     _place(board, Pawn("white", (4, 6)))
@@ -1124,6 +1210,9 @@ def run_all_tests():
         test_uci_go_reports_score_info_line,
         test_uci_eval_reports_score_without_bestmove,
         test_uci_go_reports_multipv_lines_when_enabled,
+        test_uci_go_depth_two_with_multipv_three_emits_nine_terminal_lines,
+        test_uci_terminal_lines_outputs_full_width_tree,
+        test_uci_proxy_logs_bidirectional_traffic,
         test_move_to_uci_adds_queen_promotion_suffix,
     ]
 

@@ -7,3 +7,11 @@ game.txt
 game.pgn
 ai_eval.so
 lichess-bot
+uci_traffic.log
+*.log
+lichess_bot_auto_logs/
+online1
+online2
+opencode-OpenCode_Chess_UCI.pgn
+testpos.fen
+C:\\path\\to\\uci_traffic.log

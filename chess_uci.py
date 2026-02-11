@@ -23,6 +23,7 @@ from chess import (
 
 ENGINE_NAME = "OpenCode Chess UCI"
 ENGINE_AUTHOR = "OpenCode"
+MAX_GO_TERMINAL_LINES = 5000
 
 
 def _opponent(color):
@@ -303,6 +304,53 @@ def _rank_standard_legal_moves(board, color, profile):
     scored_moves.sort(key=lambda entry: entry[0], reverse=True)
     return scored_moves
 
+
+def _collect_terminal_lines(board, color, profile, remaining_plies, width, pv_prefix, output, line_limit=None):
+    if line_limit is not None and len(output) >= line_limit:
+        return
+
+    if remaining_plies <= 0:
+        material_score, _, tiebreaker, _ = _score_position_components(board, color, profile)
+        encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+        output.append((encoded_cp, pv_prefix))
+        return
+
+    ranked_moves = _rank_standard_legal_moves(board, color, profile)
+    if not ranked_moves:
+        material_score, _, tiebreaker, _ = _score_position_components(board, color, profile)
+        encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+        output.append((encoded_cp, pv_prefix))
+        return
+
+    next_color = _opponent(color)
+    for _, move, _ in ranked_moves[:width]:
+        if line_limit is not None and len(output) >= line_limit:
+            return
+        simulation = board.clone()
+        simulation.move_piece(move[0], move[1])
+        _collect_terminal_lines(
+            simulation,
+            next_color,
+            profile,
+            remaining_plies - 1,
+            width,
+            pv_prefix + [move_to_uci(board, move)],
+            output,
+            line_limit,
+        )
+
+
+def _parse_int_option(tokens, name, default_value, minimum_value):
+    for index, token in enumerate(tokens):
+        if token != name or index + 1 >= len(tokens):
+            continue
+        try:
+            parsed = int(tokens[index + 1])
+        except ValueError:
+            return default_value
+        return max(minimum_value, parsed)
+    return default_value
+
 import sys
 class UCIEngine:
     def __init__(self):
@@ -425,12 +473,24 @@ class UCIEngine:
 
         profile["plies"] = search_depth
 
-        ranked_moves = _rank_standard_legal_moves(self.board, self.active_color, profile)
-        if ranked_moves:
-            for index, (_, move, encoded_cp) in enumerate(ranked_moves[: self.multipv], start=1):
+        if self.multipv > 1:
+            terminal_lines = []
+            _collect_terminal_lines(
+                self.board,
+                self.active_color,
+                profile,
+                search_depth,
+                self.multipv,
+                [],
+                terminal_lines,
+                line_limit=MAX_GO_TERMINAL_LINES,
+            )
+            for index, (encoded_cp, pv_moves) in enumerate(terminal_lines, start=1):
                 self._send(
-                    f"info depth {search_depth} multipv {index} score cp {encoded_cp} pv {move_to_uci(self.board, move)}"
+                    f"info depth {search_depth} multipv {index} score cp {encoded_cp} pv {' '.join(pv_moves)}"
                 )
+            if len(terminal_lines) >= MAX_GO_TERMINAL_LINES:
+                self._send(f"info string multipv lines capped at {MAX_GO_TERMINAL_LINES}")
 
         chosen_move = choose_ai_move(self.board, self.active_color, profile)
         if chosen_move is not None and _is_standard_legal_move(self.board, self.active_color, chosen_move):
@@ -467,6 +527,30 @@ class UCIEngine:
         self._send(
             f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
         )
+
+    def _handle_terminal_lines(self, line):
+        profile = dict(self.profile_by_id[self.profile_id])
+        tokens = line.split()[1:]
+        depth = _parse_int_option(tokens, "depth", 4, 1)
+        width = _parse_int_option(tokens, "width", 5, 1)
+
+        terminal_lines = []
+        _collect_terminal_lines(
+            self.board,
+            self.active_color,
+            profile,
+            depth,
+            width,
+            [],
+            terminal_lines,
+            line_limit=None,
+        )
+
+        for index, (encoded_cp, pv_moves) in enumerate(terminal_lines, start=1):
+            self._send(
+                f"info depth {depth} multipv {index} score cp {encoded_cp} pv {' '.join(pv_moves)}"
+            )
+        self._send(f"info string terminal_lines {len(terminal_lines)}")
 
     def run(self):
         try:
@@ -528,6 +612,9 @@ class UCIEngine:
                     continue
                 if line == "eval":
                     self._handle_eval()
+                    continue
+                if line.startswith("terminal_lines"):
+                    self._handle_terminal_lines(line)
                     continue
                 if line in ("stop", "ponderhit"):
                     continue
