@@ -267,8 +267,12 @@ def _choose_fallback_standard_move(board, color, profile):
 def _score_move_components(board, color, move, profile):
     simulation = board.clone()
     simulation.move_piece(move[0], move[1])
+    return _score_position_components(simulation, color, profile)
+
+
+def _score_position_components(board, color, profile):
     material_score, heuristic_score = evaluate_position_scores(
-        simulation,
+        board,
         color,
         profile["piece_values"],
         pawn_rank_values=profile.get("pawn_rank_values"),
@@ -279,7 +283,13 @@ def _score_move_components(board, color, move, profile):
     )
     material_cp = int(round(material_score * 100.0))
     total_score = material_score + heuristic_score
-    return material_cp, heuristic_score, total_score
+    return material_score, material_cp, heuristic_score, total_score
+
+
+def _encode_main_and_tiebreak_milipawns(material_score, heuristic_score):
+    main_decipawns = int(round(abs(material_score) * 10.0))
+    tiebreak_pawns_bucket = int(abs(heuristic_score))
+    return (main_decipawns * 100) + min(99, tiebreak_pawns_bucket)
 
 import sys
 class UCIEngine:
@@ -395,10 +405,11 @@ class UCIEngine:
         chosen_move = choose_ai_move(self.board, self.active_color, profile)
         if chosen_move is not None and _is_standard_legal_move(self.board, self.active_color, chosen_move):
             bestmove_uci = move_to_uci(self.board, chosen_move)
-            material_cp, tiebreaker, total = _score_move_components(self.board, self.active_color, chosen_move, profile)
-            self._send(f"info depth {search_depth} score cp {material_cp} pv {bestmove_uci}")
+            material_score, material_cp, tiebreaker, _ = _score_move_components(self.board, self.active_color, chosen_move, profile)
+            encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+            self._send(f"info depth {search_depth} score cp {encoded_cp} pv {bestmove_uci}")
             self._send(
-                f"info string eval material_cp {material_cp:+d} tiebreak {tiebreaker:+.2f} total {total:+.2f}"
+                f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
             )
             self._send(f"bestmove {move_to_uci(self.board, chosen_move)}")
             return
@@ -410,12 +421,22 @@ class UCIEngine:
 
         self._send("info string Primary move failed strict legality check; using fallback")
         fallback_uci = move_to_uci(self.board, fallback_move)
-        material_cp, tiebreaker, total = _score_move_components(self.board, self.active_color, fallback_move, profile)
-        self._send(f"info depth {search_depth} score cp {material_cp} pv {fallback_uci}")
+        material_score, material_cp, tiebreaker, _ = _score_move_components(self.board, self.active_color, fallback_move, profile)
+        encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+        self._send(f"info depth {search_depth} score cp {encoded_cp} pv {fallback_uci}")
         self._send(
-            f"info string eval material_cp {material_cp:+d} tiebreak {tiebreaker:+.2f} total {total:+.2f}"
+            f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
         )
         self._send(f"bestmove {move_to_uci(self.board, fallback_move)}")
+
+    def _handle_eval(self):
+        profile = dict(self.profile_by_id[self.profile_id])
+        material_score, material_cp, tiebreaker, _ = _score_position_components(self.board, self.active_color, profile)
+        encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+        self._send(f"info depth 0 score cp {encoded_cp}")
+        self._send(
+            f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
+        )
 
     def run(self):
         try:
@@ -474,6 +495,9 @@ class UCIEngine:
                     continue
                 if line.startswith("go"):
                     self._handle_go(line)
+                    continue
+                if line == "eval":
+                    self._handle_eval()
                     continue
                 if line in ("stop", "ponderhit"):
                     continue

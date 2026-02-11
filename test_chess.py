@@ -987,8 +987,49 @@ def test_uci_go_reports_score_info_line():
     output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
     assert any(line.startswith("info depth 1 score cp ") for line in output_lines)
-    assert any(line.startswith("info string eval material_cp ") and " tiebreak " in line for line in output_lines)
+    assert any(
+        line.startswith("info string eval main_pawns ")
+        and " main_cp " in line
+        and " tiebreak_pawns " in line
+        for line in output_lines
+    )
     assert any(line.startswith("bestmove ") for line in output_lines)
+
+
+def test_uci_eval_reports_score_without_bestmove():
+    command = ["python3", "chess_uci.py", "d4_pawnwise"]
+    uci_input = (
+        "uci\n"
+        "isready\n"
+        "position fen 3r4/p4r2/3b1p2/2pk2pp/P1p1R3/B1Pp1P1N/3P2PP/5K2 w - - 8 30\n"
+        "eval\n"
+        "quit\n"
+    )
+    completed = subprocess.run(
+        command,
+        input=uci_input,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+    assert any(line.startswith("info depth 0 score cp ") for line in output_lines)
+    assert any(
+        line.startswith("info string eval main_pawns ")
+        and " main_cp " in line
+        and " tiebreak_pawns " in line
+        for line in output_lines
+    )
+    cp_line = next(line for line in output_lines if line.startswith("info depth 0 score cp "))
+    cp_value = int(cp_line.split()[5])
+    eval_line = next(line for line in output_lines if line.startswith("info string eval main_pawns "))
+    tokens = eval_line.split()
+    main_pawns = float(tokens[4])
+    tiebreak_pawns = float(tokens[8])
+    assert cp_value // 100 == int(round(abs(main_pawns) * 10.0))
+    assert cp_value % 100 == min(99, int(abs(tiebreak_pawns)))
+    assert not any(line.startswith("bestmove ") for line in output_lines)
 
 
 def test_move_to_uci_adds_queen_promotion_suffix():
@@ -1051,6 +1092,7 @@ def run_all_tests():
         test_c_search_cache_handle_reused_across_turns,
         test_parse_uci_position_startpos_with_moves_tracks_turn,
         test_uci_go_reports_score_info_line,
+        test_uci_eval_reports_score_without_bestmove,
         test_move_to_uci_adds_queen_promotion_suffix,
     ]
 
