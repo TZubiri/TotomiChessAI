@@ -12,7 +12,7 @@ from chess import (
     choose_ai_move,
     create_c_search_cache,
     destroy_c_search_cache,
-    evaluate_material,
+    evaluate_position_scores,
     get_ai_profiles,
     get_game_status,
     position_to_square,
@@ -247,7 +247,7 @@ def _choose_fallback_standard_move(board, color, profile):
     for move in legal_moves:
         simulation = board.clone()
         simulation.move_piece(move[0], move[1])
-        score = evaluate_material(
+        material_score, heuristic_score = evaluate_position_scores(
             simulation,
             color,
             profile["piece_values"],
@@ -257,16 +257,17 @@ def _choose_fallback_standard_move(board, color, profile):
             control_weight=profile.get("control_weight", 0.0),
             opposite_bishop_draw_factor=profile.get("opposite_bishop_draw_factor"),
         )
+        score = material_score + heuristic_score
         if score > best_score:
             best_score = score
             best_move = move
     return best_move
 
 
-def _score_move_in_centipawns(board, color, move, profile):
+def _score_move_components(board, color, move, profile):
     simulation = board.clone()
     simulation.move_piece(move[0], move[1])
-    score = evaluate_material(
+    material_score, heuristic_score = evaluate_position_scores(
         simulation,
         color,
         profile["piece_values"],
@@ -276,7 +277,9 @@ def _score_move_in_centipawns(board, color, move, profile):
         control_weight=profile.get("control_weight", 0.0),
         opposite_bishop_draw_factor=profile.get("opposite_bishop_draw_factor"),
     )
-    return int(round(score * 100.0))
+    material_cp = int(round(material_score * 100.0))
+    total_score = material_score + heuristic_score
+    return material_cp, heuristic_score, total_score
 
 import sys
 class UCIEngine:
@@ -392,8 +395,11 @@ class UCIEngine:
         chosen_move = choose_ai_move(self.board, self.active_color, profile)
         if chosen_move is not None and _is_standard_legal_move(self.board, self.active_color, chosen_move):
             bestmove_uci = move_to_uci(self.board, chosen_move)
-            cp = _score_move_in_centipawns(self.board, self.active_color, chosen_move, profile)
-            self._send(f"info depth {search_depth} score cp {cp} pv {bestmove_uci}")
+            material_cp, tiebreaker, total = _score_move_components(self.board, self.active_color, chosen_move, profile)
+            self._send(f"info depth {search_depth} score cp {material_cp} pv {bestmove_uci}")
+            self._send(
+                f"info string eval material_cp {material_cp:+d} tiebreak {tiebreaker:+.2f} total {total:+.2f}"
+            )
             self._send(f"bestmove {move_to_uci(self.board, chosen_move)}")
             return
 
@@ -404,8 +410,11 @@ class UCIEngine:
 
         self._send("info string Primary move failed strict legality check; using fallback")
         fallback_uci = move_to_uci(self.board, fallback_move)
-        cp = _score_move_in_centipawns(self.board, self.active_color, fallback_move, profile)
-        self._send(f"info depth {search_depth} score cp {cp} pv {fallback_uci}")
+        material_cp, tiebreaker, total = _score_move_components(self.board, self.active_color, fallback_move, profile)
+        self._send(f"info depth {search_depth} score cp {material_cp} pv {fallback_uci}")
+        self._send(
+            f"info string eval material_cp {material_cp:+d} tiebreak {tiebreaker:+.2f} total {total:+.2f}"
+        )
         self._send(f"bestmove {move_to_uci(self.board, fallback_move)}")
 
     def run(self):

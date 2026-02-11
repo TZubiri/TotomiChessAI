@@ -987,6 +987,7 @@ def test_uci_go_reports_score_info_line():
     output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
     assert any(line.startswith("info depth 1 score cp ") for line in output_lines)
+    assert any(line.startswith("info string eval material_cp ") and " tiebreak " in line for line in output_lines)
     assert any(line.startswith("bestmove ") for line in output_lines)
 
 
