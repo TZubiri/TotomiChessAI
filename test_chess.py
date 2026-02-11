@@ -1032,6 +1032,36 @@ def test_uci_eval_reports_score_without_bestmove():
     assert not any(line.startswith("bestmove ") for line in output_lines)
 
 
+def test_uci_go_reports_multipv_lines_when_enabled():
+    if not c_search_available():
+        return
+
+    command = ["python3", "chess_uci.py", "d2_basic"]
+    uci_input = (
+        "uci\n"
+        "isready\n"
+        "setoption name MultiPV value 3\n"
+        "position startpos\n"
+        "go depth 1\n"
+        "quit\n"
+    )
+    completed = subprocess.run(
+        command,
+        input=uci_input,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+    multipv_lines = [line for line in output_lines if line.startswith("info depth 1 multipv ")]
+    assert len(multipv_lines) >= 3
+    assert any(" multipv 1 " in line and " pv " in line for line in multipv_lines)
+    assert any(" multipv 2 " in line and " pv " in line for line in multipv_lines)
+    assert any(" multipv 3 " in line and " pv " in line for line in multipv_lines)
+    assert any(line.startswith("bestmove ") for line in output_lines)
+
+
 def test_move_to_uci_adds_queen_promotion_suffix():
     board = _empty_board()
     _place(board, Pawn("white", (4, 6)))
@@ -1093,6 +1123,7 @@ def run_all_tests():
         test_parse_uci_position_startpos_with_moves_tracks_turn,
         test_uci_go_reports_score_info_line,
         test_uci_eval_reports_score_without_bestmove,
+        test_uci_go_reports_multipv_lines_when_enabled,
         test_move_to_uci_adds_queen_promotion_suffix,
     ]
 

@@ -291,6 +291,18 @@ def _encode_main_and_tiebreak_milipawns(material_score, heuristic_score):
     tiebreak_pawns_bucket = int(abs(heuristic_score))
     return (main_decipawns * 100) + min(99, tiebreak_pawns_bucket)
 
+
+def _rank_standard_legal_moves(board, color, profile):
+    scored_moves = []
+    for move in board.get_legal_moves_for_color(color):
+        if not _is_standard_legal_move(board, color, move):
+            continue
+        material_score, material_cp, tiebreaker, total = _score_move_components(board, color, move, profile)
+        encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+        scored_moves.append((total, move, encoded_cp))
+    scored_moves.sort(key=lambda entry: entry[0], reverse=True)
+    return scored_moves
+
 import sys
 class UCIEngine:
     def __init__(self):
@@ -305,6 +317,7 @@ class UCIEngine:
 
         self.profile_id = default_profile_id
         self.cache_mb = int(os.environ.get("CHESS_UCI_CACHE_MB", "512"))
+        self.multipv = 1
         self.search_cache_handle = None
         self.board = Board()
         self.active_color = "white"
@@ -354,6 +367,7 @@ class UCIEngine:
         self._send(
             f"option name CacheMB type spin default {self.cache_mb} min 16 max 4096"
         )
+        self._send("option name MultiPV type spin default 1 min 1 max 16")
         self._send("uciok")
 
     def _handle_setoption(self, line):
@@ -384,6 +398,15 @@ class UCIEngine:
                 return
             self.cache_mb = max(16, min(4096, parsed))
             self._reset_cache()
+            return
+
+        if name == "multipv":
+            try:
+                parsed = int(value)
+            except ValueError:
+                self._send(f"info string Invalid MultiPV value '{value}'")
+                return
+            self.multipv = max(1, min(16, parsed))
 
     def _handle_go(self, line):
         self._ensure_cache()
@@ -401,6 +424,13 @@ class UCIEngine:
                 break
 
         profile["plies"] = search_depth
+
+        ranked_moves = _rank_standard_legal_moves(self.board, self.active_color, profile)
+        if ranked_moves:
+            for index, (_, move, encoded_cp) in enumerate(ranked_moves[: self.multipv], start=1):
+                self._send(
+                    f"info depth {search_depth} multipv {index} score cp {encoded_cp} pv {move_to_uci(self.board, move)}"
+                )
 
         chosen_move = choose_ai_move(self.board, self.active_color, profile)
         if chosen_move is not None and _is_standard_legal_move(self.board, self.active_color, chosen_move):
