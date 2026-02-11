@@ -178,7 +178,7 @@ SPECIAL_AI_PROFILES = [
             "bishop": 3.0,
             "rook": 5.0,
             "queen": 9.0,
-            "king": 0.0,
+            "king": 30.0,
         },
         "pawn_rank_values": {
             5: 1.1,

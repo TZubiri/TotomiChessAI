@@ -1,5 +1,6 @@
 import tempfile
 import random
+import subprocess
 from pathlib import Path
 import builtins
 
@@ -883,6 +884,45 @@ def test_c_search_returns_legal_move_when_available():
     assert move in board.get_legal_moves_for_color("white")
 
 
+def test_pawnwise_fen_prefers_kg1_or_g2_for_shallow_depths():
+    if not c_search_available():
+        return
+
+    fen_tokens = [
+        "fen",
+        "3r4/p4r2/3b1p2/2pk2pp/P1p1R3/B1Pp1P1N/3P2PP/5K2",
+        "w",
+        "-",
+        "-",
+        "8",
+        "30",
+    ]
+    profiles = get_ai_profiles()
+    profile = next(profile for profile in profiles if profile["id"] == "d4_pawnwise")
+
+    for plies in range(1, 5):
+        board, active_color = parse_uci_position(fen_tokens)
+        move = choose_minimax_legal_move(
+            board,
+            active_color,
+            plies,
+            profile["piece_values"],
+            pawn_rank_values=profile.get("pawn_rank_values"),
+            backward_pawn_value=profile.get("backward_pawn_value"),
+            position_multipliers=profile.get("position_multipliers"),
+            control_weight=profile.get("control_weight", 0.0),
+            opposite_bishop_draw_factor=profile.get("opposite_bishop_draw_factor"),
+        )
+        assert move is not None
+
+        is_kg1 = move == ((5, 0), (6, 0))
+        is_g2_move = move[0] == (6, 1)
+        assert is_kg1 or is_g2_move, (
+            f"Expected Kg1 or a move from g2 at {plies} plies, got "
+            f"{position_to_square(move[0])}{position_to_square(move[1])}"
+        )
+
+
 def test_c_search_cache_handle_reused_across_turns():
     if not c_search_available():
         return
@@ -929,6 +969,25 @@ def test_parse_uci_position_startpos_with_moves_tracks_turn():
     assert isinstance(piece_e4, Pawn) and piece_e4.color == "white"
     assert isinstance(piece_e5, Pawn) and piece_e5.color == "black"
     assert isinstance(piece_f3, Knight) and piece_f3.color == "white"
+
+
+def test_uci_go_reports_score_info_line():
+    if not c_search_available():
+        return
+
+    command = ["python3", "chess_uci.py", "d2_basic"]
+    uci_input = "uci\nisready\nposition startpos\ngo depth 1\nquit\n"
+    completed = subprocess.run(
+        command,
+        input=uci_input,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+    assert any(line.startswith("info depth 1 score cp ") for line in output_lines)
+    assert any(line.startswith("bestmove ") for line in output_lines)
 
 
 def test_move_to_uci_adds_queen_promotion_suffix():
@@ -987,8 +1046,10 @@ def run_all_tests():
         test_move_text_to_algebraic_uses_pawn_file_on_capture,
         test_c_piece_evaluation_matches_python_when_available,
         test_c_search_returns_legal_move_when_available,
+        test_pawnwise_fen_prefers_kg1_or_g2_for_shallow_depths,
         test_c_search_cache_handle_reused_across_turns,
         test_parse_uci_position_startpos_with_moves_tracks_turn,
+        test_uci_go_reports_score_info_line,
         test_move_to_uci_adds_queen_promotion_suffix,
     ]
 

@@ -262,6 +262,22 @@ def _choose_fallback_standard_move(board, color, profile):
             best_move = move
     return best_move
 
+
+def _score_move_in_centipawns(board, color, move, profile):
+    simulation = board.clone()
+    simulation.move_piece(move[0], move[1])
+    score = evaluate_material(
+        simulation,
+        color,
+        profile["piece_values"],
+        pawn_rank_values=profile.get("pawn_rank_values"),
+        backward_pawn_value=profile.get("backward_pawn_value"),
+        position_multipliers=profile.get("position_multipliers"),
+        control_weight=profile.get("control_weight", 0.0),
+        opposite_bishop_draw_factor=profile.get("opposite_bishop_draw_factor"),
+    )
+    return int(round(score * 100.0))
+
 import sys
 class UCIEngine:
     def __init__(self):
@@ -375,6 +391,9 @@ class UCIEngine:
 
         chosen_move = choose_ai_move(self.board, self.active_color, profile)
         if chosen_move is not None and _is_standard_legal_move(self.board, self.active_color, chosen_move):
+            bestmove_uci = move_to_uci(self.board, chosen_move)
+            cp = _score_move_in_centipawns(self.board, self.active_color, chosen_move, profile)
+            self._send(f"info depth {search_depth} score cp {cp} pv {bestmove_uci}")
             self._send(f"bestmove {move_to_uci(self.board, chosen_move)}")
             return
 
@@ -384,6 +403,9 @@ class UCIEngine:
             return
 
         self._send("info string Primary move failed strict legality check; using fallback")
+        fallback_uci = move_to_uci(self.board, fallback_move)
+        cp = _score_move_in_centipawns(self.board, self.active_color, fallback_move, profile)
+        self._send(f"info depth {search_depth} score cp {cp} pv {fallback_uci}")
         self._send(f"bestmove {move_to_uci(self.board, fallback_move)}")
 
     def run(self):
