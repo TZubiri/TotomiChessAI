@@ -976,7 +976,7 @@ def test_uci_go_reports_score_info_line():
         return
 
     command = ["python3", "chess_uci.py", "d2_basic"]
-    uci_input = "uci\nisready\nposition startpos\ngo depth 1\nquit\n"
+    uci_input = "uci\nisready\nsetoption name InfoMode value verbose\nposition startpos\ngo depth 1\nquit\n"
     completed = subprocess.run(
         command,
         input=uci_input,
@@ -1040,6 +1040,7 @@ def test_uci_go_reports_multipv_lines_when_enabled():
     uci_input = (
         "uci\n"
         "isready\n"
+        "setoption name InfoMode value verbose\n"
         "setoption name MultiPV value 3\n"
         "position startpos\n"
         "go depth 1\n"
@@ -1074,6 +1075,7 @@ def test_uci_go_depth_two_with_multipv_three_emits_depth_updates():
     uci_input = (
         "uci\n"
         "isready\n"
+        "setoption name InfoMode value verbose\n"
         "setoption name MultiPV value 3\n"
         "position startpos\n"
         "go depth 2\n"
@@ -1112,6 +1114,33 @@ def test_uci_terminal_lines_outputs_full_width_tree():
     terminal_rows = [line for line in output_lines if line.startswith("info depth 2 multipv ") and " pv " in line]
     assert len(terminal_rows) == 9
     assert any(line == "info string terminal_lines 9" for line in output_lines)
+
+
+def test_uci_go_terse_mode_omits_verbose_info_lines():
+    if not c_search_available():
+        return
+
+    command = ["python3", "chess_uci.py", "d2_basic"]
+    uci_input = (
+        "uci\n"
+        "isready\n"
+        "setoption name InfoMode value terse\n"
+        "position startpos\n"
+        "go depth 2\n"
+        "quit\n"
+    )
+    completed = subprocess.run(
+        command,
+        input=uci_input,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+    assert any(line.startswith("bestmove ") for line in output_lines)
+    assert not any(line.startswith("info depth ") for line in output_lines)
+    assert not any(line.startswith("info string eval ") for line in output_lines)
 
 
 def test_uci_proxy_logs_bidirectional_traffic():
@@ -1220,6 +1249,7 @@ def run_all_tests():
         test_uci_go_reports_multipv_lines_when_enabled,
         test_uci_go_depth_two_with_multipv_three_emits_depth_updates,
         test_uci_terminal_lines_outputs_full_width_tree,
+        test_uci_go_terse_mode_omits_verbose_info_lines,
         test_uci_proxy_logs_bidirectional_traffic,
         test_move_to_uci_adds_queen_promotion_suffix,
     ]

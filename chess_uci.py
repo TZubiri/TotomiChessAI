@@ -374,6 +374,19 @@ def _parse_int_option(tokens, name, default_value, minimum_value):
         return max(minimum_value, parsed)
     return default_value
 
+
+UCI_INFO_MODE_TERSE = "terse"
+UCI_INFO_MODE_VERBOSE = "verbose"
+UCI_INFO_MODES = {UCI_INFO_MODE_TERSE, UCI_INFO_MODE_VERBOSE}
+
+
+def _normalize_info_mode(value, default_mode):
+    normalized = (value or "").strip().lower()
+    if normalized in UCI_INFO_MODES:
+        return normalized
+    return default_mode
+
+
 import sys
 class UCIEngine:
     def __init__(self):
@@ -389,6 +402,10 @@ class UCIEngine:
         self.profile_id = default_profile_id
         self.cache_mb = int(os.environ.get("CHESS_UCI_CACHE_MB", "512"))
         self.multipv = 1
+        self.info_mode = _normalize_info_mode(
+            os.environ.get("CHESS_UCI_INFO_MODE", UCI_INFO_MODE_TERSE),
+            UCI_INFO_MODE_TERSE,
+        )
         self.search_cache_handle = None
         self.board = Board()
         self.active_color = "white"
@@ -439,6 +456,10 @@ class UCIEngine:
             f"option name CacheMB type spin default {self.cache_mb} min 16 max 4096"
         )
         self._send("option name MultiPV type spin default 1 min 1 max 16")
+        self._send(
+            "option name InfoMode type combo default "
+            f"{self.info_mode} var {UCI_INFO_MODE_TERSE} var {UCI_INFO_MODE_VERBOSE}"
+        )
         self._send("uciok")
 
     def _handle_setoption(self, line):
@@ -478,6 +499,14 @@ class UCIEngine:
                 self._send(f"info string Invalid MultiPV value '{value}'")
                 return
             self.multipv = max(1, min(16, parsed))
+            return
+
+        if name == "infomode":
+            selected_mode = _normalize_info_mode(value, None)
+            if selected_mode is None:
+                self._send(f"info string Invalid InfoMode value '{value}'")
+                return
+            self.info_mode = selected_mode
 
     def _handle_go(self, line):
         self._ensure_cache()
@@ -496,37 +525,39 @@ class UCIEngine:
 
         profile["plies"] = search_depth
 
-        for current_depth in range(1, search_depth + 1):
-            ranked_root_moves = _rank_standard_legal_moves(self.board, self.active_color, profile)
-            if not ranked_root_moves:
-                break
-            for pv_index, (_, root_move, _) in enumerate(ranked_root_moves[: self.multipv], start=1):
-                encoded_cp, pv_moves, material_score, material_cp, tiebreaker = _build_pv_for_root(
-                    self.board,
-                    self.active_color,
-                    profile,
-                    root_move,
-                    current_depth,
-                )
-                self._send(
-                    f"info depth {current_depth} seldepth {current_depth} nodes {len(ranked_root_moves)} "
-                    f"score cp {encoded_cp} multipv {pv_index} pv {' '.join(pv_moves)}"
-                )
-                self._send(
-                    f"info string depth {current_depth} multipv {pv_index} eval main_pawns {material_score:+.2f} "
-                    f"main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
-                )
+        if self.info_mode == UCI_INFO_MODE_VERBOSE:
+            for current_depth in range(1, search_depth + 1):
+                ranked_root_moves = _rank_standard_legal_moves(self.board, self.active_color, profile)
+                if not ranked_root_moves:
+                    break
+                for pv_index, (_, root_move, _) in enumerate(ranked_root_moves[: self.multipv], start=1):
+                    encoded_cp, pv_moves, material_score, material_cp, tiebreaker = _build_pv_for_root(
+                        self.board,
+                        self.active_color,
+                        profile,
+                        root_move,
+                        current_depth,
+                    )
+                    self._send(
+                        f"info depth {current_depth} seldepth {current_depth} nodes {len(ranked_root_moves)} "
+                        f"score cp {encoded_cp} multipv {pv_index} pv {' '.join(pv_moves)}"
+                    )
+                    self._send(
+                        f"info string depth {current_depth} multipv {pv_index} eval main_pawns {material_score:+.2f} "
+                        f"main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
+                    )
 
         chosen_move = choose_ai_move(self.board, self.active_color, profile)
         if chosen_move is not None and _is_standard_legal_move(self.board, self.active_color, chosen_move):
             bestmove_uci = move_to_uci(self.board, chosen_move)
-            material_score, material_cp, tiebreaker, _ = _score_move_components(self.board, self.active_color, chosen_move, profile)
-            encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
-            self._send(f"info depth {search_depth} score cp {encoded_cp} pv {bestmove_uci}")
-            self._send(
-                f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
-            )
-            self._send(f"bestmove {move_to_uci(self.board, chosen_move)}")
+            if self.info_mode == UCI_INFO_MODE_VERBOSE:
+                material_score, material_cp, tiebreaker, _ = _score_move_components(self.board, self.active_color, chosen_move, profile)
+                encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+                self._send(f"info depth {search_depth} score cp {encoded_cp} pv {bestmove_uci}")
+                self._send(
+                    f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
+                )
+            self._send(f"bestmove {bestmove_uci}")
             return
 
         fallback_move = _choose_fallback_standard_move(self.board, self.active_color, profile)
@@ -536,13 +567,14 @@ class UCIEngine:
 
         self._send("info string Primary move failed strict legality check; using fallback")
         fallback_uci = move_to_uci(self.board, fallback_move)
-        material_score, material_cp, tiebreaker, _ = _score_move_components(self.board, self.active_color, fallback_move, profile)
-        encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
-        self._send(f"info depth {search_depth} score cp {encoded_cp} pv {fallback_uci}")
-        self._send(
-            f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
-        )
-        self._send(f"bestmove {move_to_uci(self.board, fallback_move)}")
+        if self.info_mode == UCI_INFO_MODE_VERBOSE:
+            material_score, material_cp, tiebreaker, _ = _score_move_components(self.board, self.active_color, fallback_move, profile)
+            encoded_cp = _encode_main_and_tiebreak_milipawns(material_score, tiebreaker)
+            self._send(f"info depth {search_depth} score cp {encoded_cp} pv {fallback_uci}")
+            self._send(
+                f"info string eval main_pawns {material_score:+.2f} main_cp {material_cp:+d} tiebreak_pawns {tiebreaker:+.2f}"
+            )
+        self._send(f"bestmove {fallback_uci}")
 
     def _handle_eval(self):
         profile = dict(self.profile_by_id[self.profile_id])
