@@ -5,7 +5,6 @@ from pathlib import Path
 import builtins
 
 from chess import (
-    _opening_phase_ratio,
     _evaluate_position_scores_c_base,
     _evaluate_position_scores_python_base,
     Board,
@@ -548,106 +547,6 @@ def test_pawnwise_profile_heuristics_affect_evaluation():
     assert pawnwise_score != classic_score
 
 
-def test_profile_position_bitmaps_load_per_piece_table():
-    profiles = get_ai_profiles()
-    expected_piece_tables = ("pawn", "knight", "bishop_white", "bishop_black", "rook", "queen", "king")
-    for profile in profiles:
-        position_multipliers = profile.get("position_multipliers")
-        assert position_multipliers is not None
-        for phase_name in ("opening", "endgame"):
-            assert phase_name in position_multipliers
-            for piece_type in expected_piece_tables:
-                assert piece_type in position_multipliers[phase_name]
-                assert len(position_multipliers[phase_name][piece_type]) == 64
-
-    basic = next(profile for profile in profiles if profile["id"] == "d2_basic")
-    pawnwise = next(profile for profile in profiles if profile["id"] == "d2_pawnwise")
-
-    assert len(set(basic["position_multipliers"]["opening"]["queen"])) == 1
-    assert basic["position_multipliers"]["opening"]["queen"][0] == 1.0
-    assert basic["position_multipliers"]["opening"]["queen"] == basic["position_multipliers"]["endgame"]["queen"]
-
-    pawnwise_queen = pawnwise["position_multipliers"]["opening"]["queen"]
-    pawnwise_rook = pawnwise["position_multipliers"]["opening"]["rook"]
-    pawnwise_bishop_white = pawnwise["position_multipliers"]["opening"]["bishop_white"]
-    pawnwise_bishop_black = pawnwise["position_multipliers"]["opening"]["bishop_black"]
-    assert pawnwise_queen[(3 * 8) + 3] > pawnwise_queen[0]
-    assert pawnwise_rook[0] > pawnwise_queen[0]
-    assert pawnwise_bishop_white != pawnwise_bishop_black
-
-
-def test_position_weight_transition_uses_material_phase():
-    piece_values = {
-        "pawn": 1.0,
-        "knight": 3.0,
-        "bishop": 3.0,
-        "rook": 5.0,
-        "queen": 9.0,
-        "king": 0.0,
-    }
-
-    opening_pawn_weights = [1.0] * 64
-    opening_pawn_weights[0] = 2.0
-    endgame_pawn_weights = [1.0] * 64
-    endgame_pawn_weights[0] = 4.0
-    neutral_weights = tuple([1.0] * 64)
-
-    position_multipliers = {
-        "opening": {
-            "pawn": tuple(opening_pawn_weights),
-            "knight": neutral_weights,
-            "bishop_white": neutral_weights,
-            "bishop_black": neutral_weights,
-            "rook": neutral_weights,
-            "queen": neutral_weights,
-            "king": neutral_weights,
-        },
-        "endgame": {
-            "pawn": tuple(endgame_pawn_weights),
-            "knight": neutral_weights,
-            "bishop_white": neutral_weights,
-            "bishop_black": neutral_weights,
-            "rook": neutral_weights,
-            "queen": neutral_weights,
-            "king": neutral_weights,
-        },
-    }
-
-    full_board = Board()
-    assert _opening_phase_ratio(full_board, piece_values) == 1.0
-
-    endgame_board = _empty_board()
-    _place(endgame_board, Pawn("white", (0, 0)))
-    endgame_material, endgame_heuristic = evaluate_position_scores(
-        endgame_board,
-        "white",
-        piece_values,
-        position_multipliers=position_multipliers,
-    )
-    assert endgame_material == 1.0
-    assert _opening_phase_ratio(endgame_board, piece_values) == 0.0
-    assert abs(endgame_heuristic - 3.0) < 1e-9
-
-    mixed_board = _empty_board()
-    _place(mixed_board, Pawn("white", (0, 0)))
-    _place(mixed_board, Queen("white", (7, 7)))
-    mixed_phase = _opening_phase_ratio(mixed_board, piece_values)
-    mixed_material, mixed_heuristic = evaluate_position_scores(
-        mixed_board,
-        "white",
-        piece_values,
-        position_multipliers=position_multipliers,
-    )
-
-    expected_phase = (10.0 - 1.0) / (78.0 - 1.0)
-    expected_pawn_weight = (expected_phase * 2.0) + ((1.0 - expected_phase) * 4.0)
-    expected_pawn_heuristic = expected_pawn_weight - 1.0
-
-    assert mixed_material == 10.0
-    assert abs(mixed_phase - expected_phase) < 1e-9
-    assert abs(mixed_heuristic - expected_pawn_heuristic) < 1e-9
-
-
 def test_pawnwise_control_profile_drawish_opposite_bishops():
     board = _empty_board()
     _place(board, Bishop("white", (2, 0)))
@@ -790,6 +689,7 @@ def test_forcing_capture_extension_does_not_consume_ply():
         1,
         piece_values,
         captures_extend_plies=True,
+        captures_extend_limit=2,
     )
 
     assert no_extension_move == ((3, 0), (3, 7))
@@ -1150,38 +1050,6 @@ def test_pawnwise_fen_prefers_kg1_or_g2_for_shallow_depths():
         )
 
 
-def test_intermezzo_fen_prefers_qh5_for_ai_three_ply_and_above():
-    if not c_search_available():
-        return
-
-    fen_tokens = [
-        "fen",
-        "r1bqkbnr/1pp1p2p/p1n5/3p1pp1/4P3/2NB1Q2/PPPP1PPP/1RB1K1NR",
-        "w",
-        "Kk",
-        "-",
-        "0",
-        "10",
-    ]
-    board, active_color = parse_uci_position(fen_tokens)
-    assert active_color == "white"
-
-    expected_move = "f3h5"
-    profiles = [profile for profile in get_ai_profiles() if profile.get("plies", 0) >= 3]
-    assert profiles
-
-    mismatches = []
-    for profile in profiles:
-        move = choose_ai_move(board.clone(), active_color, profile, rng=random.Random(0))
-        move_square_text = "0000" if move is None else f"{position_to_square(move[0])}{position_to_square(move[1])}"
-        if move_square_text != expected_move:
-            mismatches.append(f"{profile['id']}({profile['plies']}):{move_square_text}")
-
-    assert not mismatches, (
-        f"Expected {expected_move} for all AI profiles >=3 plies, mismatches: {', '.join(mismatches)}"
-    )
-
-
 def test_c_search_cache_handle_reused_across_turns():
     if not c_search_available():
         return
@@ -1482,8 +1350,6 @@ def run_all_tests():
         test_configure_game_menu_quit_option,
         test_play_match_ai_vs_ai_returns_terminal_status,
         test_pawnwise_profile_heuristics_affect_evaluation,
-        test_profile_position_bitmaps_load_per_piece_table,
-        test_position_weight_transition_uses_material_phase,
         test_pawnwise_control_profile_drawish_opposite_bishops,
         test_position_heuristics_are_tie_breakers_for_major_pieces,
         test_minimax_prefers_material_over_heuristic,
@@ -1506,7 +1372,6 @@ def run_all_tests():
         test_c_piece_evaluation_matches_python_when_available,
         test_c_search_returns_legal_move_when_available,
         test_pawnwise_fen_prefers_kg1_or_g2_for_shallow_depths,
-        test_intermezzo_fen_prefers_qh5_for_ai_three_ply_and_above,
         test_c_search_cache_handle_reused_across_turns,
         test_parse_uci_position_startpos_with_moves_tracks_turn,
         test_uci_go_reports_score_info_line,

@@ -5,18 +5,6 @@
 
 #define MAX_PIECES 64
 #define MAX_MOVES 256
-#define POSITION_TABLE_COUNT 7
-#define PHASE_TABLE_SIZE (POSITION_TABLE_COUNT * 64)
-
-enum {
-    POSITION_TABLE_PAWN = 0,
-    POSITION_TABLE_KNIGHT = 1,
-    POSITION_TABLE_BISHOP_WHITE = 2,
-    POSITION_TABLE_BISHOP_BLACK = 3,
-    POSITION_TABLE_ROOK = 4,
-    POSITION_TABLE_QUEEN = 5,
-    POSITION_TABLE_KING = 6,
-};
 
 enum {
     PIECE_PAWN = 0,
@@ -100,104 +88,50 @@ static int opponent_color(int color) {
     return color == 0 ? 1 : 0;
 }
 
-static double clamp01(double value) {
-    if (value < 0.0) {
-        return 0.0;
-    }
-    if (value > 1.0) {
-        return 1.0;
-    }
-    return value;
+static int is_corner_square(int col, int row) {
+    return (col == 0 || col == 7) && (row == 0 || row == 7);
 }
 
-static double opening_phase_ratio(const SearchState* state, const EvalParams* params) {
-    static const int opening_counts[PIECE_KING] = {
-        16, /* pawns */
-        4,  /* knights */
-        4,  /* bishops */
-        4,  /* rooks */
-        2,  /* queens */
-    };
-
-    double opening_material = 0.0;
-    for (int piece_type = PIECE_PAWN; piece_type <= PIECE_QUEEN; piece_type++) {
-        opening_material += params->piece_values[piece_type] * (double)opening_counts[piece_type];
-    }
-
-    double endgame_material = params->piece_values[PIECE_PAWN];
-    if (opening_material <= endgame_material) {
-        return 1.0;
-    }
-
-    double current_material = 0.0;
-    for (int i = 0; i < state->piece_count; i++) {
-        if (!state->alive[i]) {
-            continue;
-        }
-        int piece_type = state->piece_type[i];
-        if (piece_type == PIECE_KING) {
-            continue;
-        }
-        current_material += params->piece_values[piece_type];
-    }
-
-    double phase = (current_material - endgame_material) / (opening_material - endgame_material);
-    return clamp01(phase);
+static int is_corner_touch_square(int col, int row) {
+    return ((col == 1 || col == 6) && (row == 0 || row == 7)) || ((row == 1 || row == 6) && (col == 0 || col == 7));
 }
 
-static double square_weight_for_piece(
-    int piece_type,
-    int piece_color,
-    int col,
-    int row,
-    const double* position_multipliers,
-    int has_position_multipliers,
-    double opening_phase
-) {
-    if (!has_position_multipliers || position_multipliers == NULL) {
+static int is_center_square(int col, int row) {
+    return (col == 3 || col == 4) && (row == 3 || row == 4);
+}
+
+static int is_center_cross_square(int col, int row) {
+    return (col == 2 && (row == 3 || row == 4))
+        || (col == 3 && (row == 2 || row == 5))
+        || (col == 4 && (row == 2 || row == 5))
+        || (col == 5 && (row == 3 || row == 4));
+}
+
+static int is_center_diagonal_square(int col, int row) {
+    return (col == 2 || col == 5) && (row == 2 || row == 5);
+}
+
+static double square_weight_for_piece(int piece_type, int col, int row, const double* position_multipliers, int has_position_multipliers) {
+    if (!has_position_multipliers) {
         return 1.0;
     }
 
-    if (
-        !is_inside(col, row)
-        || piece_type < PIECE_PAWN
-        || piece_type > PIECE_KING
-        || (piece_color != 0 && piece_color != 1)
-    ) {
-        return 1.0;
+    if (is_corner_square(col, row)) {
+        return piece_type == PIECE_ROOK ? position_multipliers[4] : position_multipliers[3];
     }
-
-    int table_index = POSITION_TABLE_PAWN;
-    switch (piece_type) {
-        case PIECE_PAWN:
-            table_index = POSITION_TABLE_PAWN;
-            break;
-        case PIECE_KNIGHT:
-            table_index = POSITION_TABLE_KNIGHT;
-            break;
-        case PIECE_BISHOP:
-            table_index = piece_color == 0 ? POSITION_TABLE_BISHOP_WHITE : POSITION_TABLE_BISHOP_BLACK;
-            break;
-        case PIECE_ROOK:
-            table_index = POSITION_TABLE_ROOK;
-            break;
-        case PIECE_QUEEN:
-            table_index = POSITION_TABLE_QUEEN;
-            break;
-        case PIECE_KING:
-            table_index = POSITION_TABLE_KING;
-            break;
-        default:
-            return 1.0;
+    if (is_corner_touch_square(col, row)) {
+        return piece_type == PIECE_ROOK ? position_multipliers[6] : position_multipliers[5];
     }
-
-    size_t square_offset = ((size_t)row * 8) + (size_t)col;
-    size_t opening_offset = ((size_t)table_index * 64) + square_offset;
-    size_t endgame_offset = (size_t)PHASE_TABLE_SIZE + ((size_t)table_index * 64) + square_offset;
-
-    double opening_weight = position_multipliers[opening_offset];
-    double endgame_weight = position_multipliers[endgame_offset];
-    return (opening_phase * opening_weight) + ((1.0 - opening_phase) * endgame_weight);
+    if (is_center_square(col, row)) {
+        return position_multipliers[0];
+    }
+    if (is_center_cross_square(col, row)) {
+        return position_multipliers[1];
+    }
+    if (is_center_diagonal_square(col, row)) {
+        return position_multipliers[2];
+    }
+    return 1.0;
 }
 
 static int compare_score(Score a, Score b) {
@@ -735,7 +669,7 @@ static int has_opposite_color_bishops_state(const SearchState* state) {
     return white_square_color != black_square_color;
 }
 
-static double control_score(const SearchState* state, int perspective_color, const EvalParams* params, double opening_phase) {
+static double control_score(const SearchState* state, int perspective_color, const EvalParams* params) {
     double total = 0.0;
     for (int i = 0; i < state->piece_count; i++) {
         if (!state->alive[i]) {
@@ -748,16 +682,13 @@ static double control_score(const SearchState* state, int perspective_color, con
 
         double controlled = 0.0;
         int piece_type = state->piece_type[i];
-        int piece_color = state->piece_color[i];
         for (int j = 0; j < moves.count; j++) {
             controlled += square_weight_for_piece(
                 piece_type,
-                piece_color,
                 moves.entries[j].to_col,
                 moves.entries[j].to_row,
                 params->position_multipliers,
-                params->has_position_multipliers,
-                opening_phase
+                params->has_position_multipliers
             );
         }
 
@@ -774,7 +705,6 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
     Score score;
     score.material = 0.0;
     score.heuristic = 0.0;
-    double opening_phase = opening_phase_ratio(state, params);
 
     for (int i = 0; i < state->piece_count; i++) {
         if (!state->alive[i]) {
@@ -804,12 +734,10 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
 
         piece_score *= square_weight_for_piece(
             piece_type,
-            piece_color,
             piece_col,
             piece_row,
             params->position_multipliers,
-            params->has_position_multipliers,
-            opening_phase
+            params->has_position_multipliers
         );
         double heuristic_score = piece_score - material_score;
 
@@ -823,7 +751,7 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
     }
 
     if (params->control_weight != 0.0) {
-        score.heuristic += params->control_weight * control_score(state, perspective_color, params, opening_phase);
+        score.heuristic += params->control_weight * control_score(state, perspective_color, params);
     }
 
     if (params->has_opposite_bishop_draw_factor && has_opposite_color_bishops_state(state)) {
