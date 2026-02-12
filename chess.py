@@ -2031,9 +2031,7 @@ def _square_weight_for_piece(piece, square, position_multipliers, opening_phase)
         table_piece_type = piece_type
 
     col, row = square
-    mapped_col = 7 - col
-    mapped_row = row if piece.color == "white" else 7 - row
-    square_index = (mapped_row * 8) + mapped_col
+    square_index = (row * 8) + col
     opening_weights = position_multipliers["opening"][table_piece_type]
     endgame_weights = position_multipliers["endgame"][table_piece_type]
     opening_weight = opening_weights[square_index]
