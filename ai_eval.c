@@ -5,6 +5,18 @@
 
 #define MAX_PIECES 64
 #define MAX_MOVES 256
+#define POSITION_TABLE_COUNT 7
+#define PHASE_TABLE_SIZE (POSITION_TABLE_COUNT * 64)
+
+enum {
+    POSITION_TABLE_PAWN = 0,
+    POSITION_TABLE_KNIGHT = 1,
+    POSITION_TABLE_BISHOP_WHITE = 2,
+    POSITION_TABLE_BISHOP_BLACK = 3,
+    POSITION_TABLE_ROOK = 4,
+    POSITION_TABLE_QUEEN = 5,
+    POSITION_TABLE_KING = 6,
+};
 
 enum {
     PIECE_PAWN = 0,
@@ -60,12 +72,16 @@ typedef struct {
     double control_weight;
     double opposite_bishop_draw_factor;
     int has_opposite_bishop_draw_factor;
+    int captures_extend_plies;
+    int captures_extend_limit;
 } EvalParams;
 
 typedef struct {
     uint64_t key;
     int remaining_plies;
     int active_color;
+    int captures_extend_plies;
+    int captures_extension_budget;
     double material;
     double heuristic;
     uint8_t valid;
@@ -84,50 +100,104 @@ static int opponent_color(int color) {
     return color == 0 ? 1 : 0;
 }
 
-static int is_corner_square(int col, int row) {
-    return (col == 0 || col == 7) && (row == 0 || row == 7);
+static double clamp01(double value) {
+    if (value < 0.0) {
+        return 0.0;
+    }
+    if (value > 1.0) {
+        return 1.0;
+    }
+    return value;
 }
 
-static int is_corner_touch_square(int col, int row) {
-    return ((col == 1 || col == 6) && (row == 0 || row == 7)) || ((row == 1 || row == 6) && (col == 0 || col == 7));
-}
+static double opening_phase_ratio(const SearchState* state, const EvalParams* params) {
+    static const int opening_counts[PIECE_KING] = {
+        16, /* pawns */
+        4,  /* knights */
+        4,  /* bishops */
+        4,  /* rooks */
+        2,  /* queens */
+    };
 
-static int is_center_square(int col, int row) {
-    return (col == 3 || col == 4) && (row == 3 || row == 4);
-}
+    double opening_material = 0.0;
+    for (int piece_type = PIECE_PAWN; piece_type <= PIECE_QUEEN; piece_type++) {
+        opening_material += params->piece_values[piece_type] * (double)opening_counts[piece_type];
+    }
 
-static int is_center_cross_square(int col, int row) {
-    return (col == 2 && (row == 3 || row == 4))
-        || (col == 3 && (row == 2 || row == 5))
-        || (col == 4 && (row == 2 || row == 5))
-        || (col == 5 && (row == 3 || row == 4));
-}
-
-static int is_center_diagonal_square(int col, int row) {
-    return (col == 2 || col == 5) && (row == 2 || row == 5);
-}
-
-static double square_weight_for_piece(int piece_type, int col, int row, const double* position_multipliers, int has_position_multipliers) {
-    if (!has_position_multipliers) {
+    double endgame_material = params->piece_values[PIECE_PAWN];
+    if (opening_material <= endgame_material) {
         return 1.0;
     }
 
-    if (is_corner_square(col, row)) {
-        return piece_type == PIECE_ROOK ? position_multipliers[4] : position_multipliers[3];
+    double current_material = 0.0;
+    for (int i = 0; i < state->piece_count; i++) {
+        if (!state->alive[i]) {
+            continue;
+        }
+        int piece_type = state->piece_type[i];
+        if (piece_type == PIECE_KING) {
+            continue;
+        }
+        current_material += params->piece_values[piece_type];
     }
-    if (is_corner_touch_square(col, row)) {
-        return piece_type == PIECE_ROOK ? position_multipliers[6] : position_multipliers[5];
+
+    double phase = (current_material - endgame_material) / (opening_material - endgame_material);
+    return clamp01(phase);
+}
+
+static double square_weight_for_piece(
+    int piece_type,
+    int piece_color,
+    int col,
+    int row,
+    const double* position_multipliers,
+    int has_position_multipliers,
+    double opening_phase
+) {
+    if (!has_position_multipliers || position_multipliers == NULL) {
+        return 1.0;
     }
-    if (is_center_square(col, row)) {
-        return position_multipliers[0];
+
+    if (
+        !is_inside(col, row)
+        || piece_type < PIECE_PAWN
+        || piece_type > PIECE_KING
+        || (piece_color != 0 && piece_color != 1)
+    ) {
+        return 1.0;
     }
-    if (is_center_cross_square(col, row)) {
-        return position_multipliers[1];
+
+    int table_index = POSITION_TABLE_PAWN;
+    switch (piece_type) {
+        case PIECE_PAWN:
+            table_index = POSITION_TABLE_PAWN;
+            break;
+        case PIECE_KNIGHT:
+            table_index = POSITION_TABLE_KNIGHT;
+            break;
+        case PIECE_BISHOP:
+            table_index = piece_color == 0 ? POSITION_TABLE_BISHOP_WHITE : POSITION_TABLE_BISHOP_BLACK;
+            break;
+        case PIECE_ROOK:
+            table_index = POSITION_TABLE_ROOK;
+            break;
+        case PIECE_QUEEN:
+            table_index = POSITION_TABLE_QUEEN;
+            break;
+        case PIECE_KING:
+            table_index = POSITION_TABLE_KING;
+            break;
+        default:
+            return 1.0;
     }
-    if (is_center_diagonal_square(col, row)) {
-        return position_multipliers[2];
-    }
-    return 1.0;
+
+    size_t square_offset = ((size_t)row * 8) + (size_t)col;
+    size_t opening_offset = ((size_t)table_index * 64) + square_offset;
+    size_t endgame_offset = (size_t)PHASE_TABLE_SIZE + ((size_t)table_index * 64) + square_offset;
+
+    double opening_weight = position_multipliers[opening_offset];
+    double endgame_weight = position_multipliers[endgame_offset];
+    return (opening_phase * opening_weight) + ((1.0 - opening_phase) * endgame_weight);
 }
 
 static int compare_score(Score a, Score b) {
@@ -427,6 +497,54 @@ static void generate_legal_moves_for_color(const SearchState* state, int color, 
     }
 }
 
+static int is_capture_move_state(const SearchState* state, const Move* move) {
+    if (move == NULL) {
+        return 0;
+    }
+    if (!is_inside(move->from_col, move->from_row) || !is_inside(move->to_col, move->to_row)) {
+        return 0;
+    }
+
+    int piece_index = state->board[move->from_row][move->from_col];
+    if (piece_index == -1 || !state->alive[piece_index]) {
+        return 0;
+    }
+
+    int piece_type = state->piece_type[piece_index];
+    int piece_color = state->piece_color[piece_index];
+    int target_index = state->board[move->to_row][move->to_col];
+    if (target_index != -1 && state->alive[target_index] && state->piece_color[target_index] != piece_color) {
+        return 1;
+    }
+
+    if (piece_type != PIECE_PAWN) {
+        return 0;
+    }
+
+    if (
+        move->from_col == move->to_col
+        || state->en_passant_target_col != move->to_col
+        || state->en_passant_target_row != move->to_row
+        || state->board[move->to_row][move->to_col] != -1
+        || !is_inside(state->en_passant_capture_col, state->en_passant_capture_row)
+    ) {
+        return 0;
+    }
+
+    int capture_index = state->board[state->en_passant_capture_row][state->en_passant_capture_col];
+    if (
+        capture_index == -1
+        || !state->alive[capture_index]
+        || state->piece_type[capture_index] != PIECE_PAWN
+        || state->piece_color[capture_index] == piece_color
+        || state->en_passant_capture_col != move->to_col
+        || state->en_passant_capture_row != move->from_row
+    ) {
+        return 0;
+    }
+    return 1;
+}
+
 static int apply_move(SearchState* state, const Move* move) {
     if (!is_inside(move->from_col, move->from_row) || !is_inside(move->to_col, move->to_row)) {
         return 0;
@@ -617,7 +735,7 @@ static int has_opposite_color_bishops_state(const SearchState* state) {
     return white_square_color != black_square_color;
 }
 
-static double control_score(const SearchState* state, int perspective_color, const EvalParams* params) {
+static double control_score(const SearchState* state, int perspective_color, const EvalParams* params, double opening_phase) {
     double total = 0.0;
     for (int i = 0; i < state->piece_count; i++) {
         if (!state->alive[i]) {
@@ -630,13 +748,16 @@ static double control_score(const SearchState* state, int perspective_color, con
 
         double controlled = 0.0;
         int piece_type = state->piece_type[i];
+        int piece_color = state->piece_color[i];
         for (int j = 0; j < moves.count; j++) {
             controlled += square_weight_for_piece(
                 piece_type,
+                piece_color,
                 moves.entries[j].to_col,
                 moves.entries[j].to_row,
                 params->position_multipliers,
-                params->has_position_multipliers
+                params->has_position_multipliers,
+                opening_phase
             );
         }
 
@@ -653,6 +774,7 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
     Score score;
     score.material = 0.0;
     score.heuristic = 0.0;
+    double opening_phase = opening_phase_ratio(state, params);
 
     for (int i = 0; i < state->piece_count; i++) {
         if (!state->alive[i]) {
@@ -682,10 +804,12 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
 
         piece_score *= square_weight_for_piece(
             piece_type,
+            piece_color,
             piece_col,
             piece_row,
             params->position_multipliers,
-            params->has_position_multipliers
+            params->has_position_multipliers,
+            opening_phase
         );
         double heuristic_score = piece_score - material_score;
 
@@ -699,7 +823,7 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
     }
 
     if (params->control_weight != 0.0) {
-        score.heuristic += params->control_weight * control_score(state, perspective_color, params);
+        score.heuristic += params->control_weight * control_score(state, perspective_color, params, opening_phase);
     }
 
     if (params->has_opposite_bishop_draw_factor && has_opposite_color_bishops_state(state)) {
@@ -748,6 +872,8 @@ static int cache_lookup(
     uint64_t key,
     int active_color,
     int remaining_plies,
+    int captures_extend_plies,
+    int captures_extension_budget,
     Score* out_score
 ) {
     if (cache == NULL || cache->entries == NULL || cache->capacity == 0) {
@@ -761,6 +887,8 @@ static int cache_lookup(
         || entry->key != key
         || entry->active_color != active_color
         || entry->remaining_plies != remaining_plies
+        || entry->captures_extend_plies != captures_extend_plies
+        || entry->captures_extension_budget != captures_extension_budget
     ) {
         return 0;
     }
@@ -775,6 +903,8 @@ static void cache_store(
     uint64_t key,
     int active_color,
     int remaining_plies,
+    int captures_extend_plies,
+    int captures_extension_budget,
     Score score
 ) {
     if (cache == NULL || cache->entries == NULL || cache->capacity == 0) {
@@ -787,6 +917,8 @@ static void cache_store(
     entry->key = key;
     entry->active_color = active_color;
     entry->remaining_plies = remaining_plies;
+    entry->captures_extend_plies = captures_extend_plies;
+    entry->captures_extension_budget = captures_extension_budget;
     entry->material = score.material;
     entry->heuristic = score.heuristic;
 }
@@ -886,12 +1018,23 @@ static Score minimax_score_state(
     int active_color,
     int perspective_color,
     int remaining_plies,
+    int captures_extension_budget,
     const EvalParams* params,
     SearchCache* cache
 ) {
     uint64_t key = hash_state(state, active_color, remaining_plies);
     Score cached_score;
-    if (cache_lookup(cache, key, active_color, remaining_plies, &cached_score)) {
+    if (
+        cache_lookup(
+            cache,
+            key,
+            active_color,
+            remaining_plies,
+            params->captures_extend_plies,
+            captures_extension_budget,
+            &cached_score
+        )
+    ) {
         return cached_score;
     }
 
@@ -899,17 +1042,21 @@ static Score minimax_score_state(
     int state_status = get_game_status_state(state, active_color, &winner);
     if (state_status == STATUS_WIN) {
         Score score = score_for_winner(winner, perspective_color);
-        cache_store(cache, key, active_color, remaining_plies, score);
+        cache_store(cache, key, active_color, remaining_plies, params->captures_extend_plies, captures_extension_budget, score);
         return score;
     }
     if (state_status == STATUS_DRAW) {
         Score score = draw_score();
-        cache_store(cache, key, active_color, remaining_plies, score);
+        cache_store(cache, key, active_color, remaining_plies, params->captures_extend_plies, captures_extension_budget, score);
         return score;
     }
-    if (remaining_plies <= 0) {
+
+    int has_extension_budget = captures_extension_budget == -1 || captures_extension_budget > 0;
+    int capture_only = params->captures_extend_plies && remaining_plies <= 0 && has_extension_budget;
+
+    if (remaining_plies <= 0 && !capture_only) {
         Score score = evaluate_state(state, perspective_color, params);
-        cache_store(cache, key, active_color, remaining_plies, score);
+        cache_store(cache, key, active_color, remaining_plies, params->captures_extend_plies, captures_extension_budget, score);
         return score;
     }
 
@@ -917,8 +1064,23 @@ static Score minimax_score_state(
     generate_legal_moves_for_color(state, active_color, &legal_moves);
     if (legal_moves.count == 0) {
         Score score = draw_score();
-        cache_store(cache, key, active_color, remaining_plies, score);
+        cache_store(cache, key, active_color, remaining_plies, params->captures_extend_plies, captures_extension_budget, score);
         return score;
+    }
+
+    if (capture_only) {
+        int has_capture = 0;
+        for (int i = 0; i < legal_moves.count; i++) {
+            if (is_capture_move_state(state, &legal_moves.entries[i])) {
+                has_capture = 1;
+                break;
+            }
+        }
+        if (!has_capture) {
+            Score score = evaluate_state(state, perspective_color, params);
+            cache_store(cache, key, active_color, remaining_plies, params->captures_extend_plies, captures_extension_budget, score);
+            return score;
+        }
     }
 
     int next_color = opponent_color(active_color);
@@ -927,16 +1089,39 @@ static Score minimax_score_state(
         best.material = -1e300;
         best.heuristic = -1e300;
         for (int i = 0; i < legal_moves.count; i++) {
+            int is_capture = is_capture_move_state(state, &legal_moves.entries[i]);
+            if (capture_only && !is_capture) {
+                continue;
+            }
+
             SearchState child = *state;
             if (!apply_move(&child, &legal_moves.entries[i])) {
                 continue;
             }
-            Score current = minimax_score_state(&child, next_color, perspective_color, remaining_plies - 1, params, cache);
+
+            int next_remaining_plies = remaining_plies - 1;
+            int next_extension_budget = captures_extension_budget;
+            if (capture_only && is_capture) {
+                next_remaining_plies = remaining_plies;
+                if (next_extension_budget > 0) {
+                    next_extension_budget -= 1;
+                }
+            }
+
+            Score current = minimax_score_state(
+                &child,
+                next_color,
+                perspective_color,
+                next_remaining_plies,
+                next_extension_budget,
+                params,
+                cache
+            );
             if (compare_score(current, best) > 0) {
                 best = current;
             }
         }
-        cache_store(cache, key, active_color, remaining_plies, best);
+        cache_store(cache, key, active_color, remaining_plies, params->captures_extend_plies, captures_extension_budget, best);
         return best;
     }
 
@@ -944,16 +1129,39 @@ static Score minimax_score_state(
     best.material = 1e300;
     best.heuristic = 1e300;
     for (int i = 0; i < legal_moves.count; i++) {
+        int is_capture = is_capture_move_state(state, &legal_moves.entries[i]);
+        if (capture_only && !is_capture) {
+            continue;
+        }
+
         SearchState child = *state;
         if (!apply_move(&child, &legal_moves.entries[i])) {
             continue;
         }
-        Score current = minimax_score_state(&child, next_color, perspective_color, remaining_plies - 1, params, cache);
+
+        int next_remaining_plies = remaining_plies - 1;
+        int next_extension_budget = captures_extension_budget;
+        if (capture_only && is_capture) {
+            next_remaining_plies = remaining_plies;
+            if (next_extension_budget > 0) {
+                next_extension_budget -= 1;
+            }
+        }
+
+        Score current = minimax_score_state(
+            &child,
+            next_color,
+            perspective_color,
+            next_remaining_plies,
+            next_extension_budget,
+            params,
+            cache
+        );
         if (compare_score(current, best) < 0) {
             best = current;
         }
     }
-    cache_store(cache, key, active_color, remaining_plies, best);
+    cache_store(cache, key, active_color, remaining_plies, params->captures_extend_plies, captures_extension_budget, best);
     return best;
 }
 
@@ -1015,6 +1223,8 @@ int evaluate_piece_components_c(
     params.control_weight = 0.0;
     params.opposite_bishop_draw_factor = 1.0;
     params.has_opposite_bishop_draw_factor = 0;
+    params.captures_extend_plies = 0;
+    params.captures_extend_limit = 0;
 
     Score score = evaluate_state(&state, perspective_color, &params);
     *out_material = score.material;
@@ -1041,6 +1251,8 @@ int choose_best_move_c(
     double control_weight,
     double opposite_bishop_draw_factor,
     int has_opposite_bishop_draw_factor,
+    int captures_extend_plies,
+    int captures_extend_limit,
     int en_passant_target_col,
     int en_passant_target_row,
     int en_passant_capture_col,
@@ -1108,6 +1320,15 @@ int choose_best_move_c(
     params.control_weight = control_weight;
     params.opposite_bishop_draw_factor = opposite_bishop_draw_factor;
     params.has_opposite_bishop_draw_factor = has_opposite_bishop_draw_factor;
+    params.captures_extend_plies = captures_extend_plies ? 1 : 0;
+    params.captures_extend_limit = captures_extend_limit;
+
+    int initial_extension_budget = params.captures_extend_limit;
+    if (!params.captures_extend_plies) {
+        initial_extension_budget = 0;
+    } else if (initial_extension_budget < -1) {
+        initial_extension_budget = -1;
+    }
 
     int next_color = opponent_color(active_color);
     Score best_score;
@@ -1120,7 +1341,15 @@ int choose_best_move_c(
         if (!apply_move(&child, &legal_moves.entries[i])) {
             continue;
         }
-        Score score = minimax_score_state(&child, next_color, active_color, plies - 1, &params, cache);
+        Score score = minimax_score_state(
+            &child,
+            next_color,
+            active_color,
+            plies - 1,
+            initial_extension_budget,
+            &params,
+            cache
+        );
         if (compare_score(score, best_score) > 0) {
             best_score = score;
             best_index = i;

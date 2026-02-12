@@ -5,6 +5,7 @@ from pathlib import Path
 import builtins
 
 from chess import (
+    _opening_phase_ratio,
     _evaluate_position_scores_c_base,
     _evaluate_position_scores_python_base,
     Board,
@@ -464,9 +465,25 @@ def test_ai_profiles_and_minimax_selection():
     assert any(profile["plies"] == 4 for profile in profiles)
     assert any(profile["plies"] == 5 for profile in profiles)
     assert any(profile["id"] == "d2_pawnwise" for profile in profiles)
+    assert any(profile["id"] == "d1_pawnwise_forcing" for profile in profiles)
+    assert any(profile["id"] == "d2_pawnwise_forcing" for profile in profiles)
     assert any(profile["id"] == "d2_pawnwise_control" for profile in profiles)
     assert any(profile["id"] == "d3_pawnwise" for profile in profiles)
+    assert any(profile["id"] == "d3_pawnwise_forcing" for profile in profiles)
     assert any(profile["id"] == "d4_pawnwise" for profile in profiles)
+
+    d1_forcing = next(profile for profile in profiles if profile["id"] == "d1_pawnwise_forcing")
+    d2_forcing = next(profile for profile in profiles if profile["id"] == "d2_pawnwise_forcing")
+    d3_forcing = next(profile for profile in profiles if profile["id"] == "d3_pawnwise_forcing")
+    assert d1_forcing["plies"] == 1
+    assert d2_forcing["plies"] == 2
+    assert d3_forcing["plies"] == 3
+    assert d1_forcing.get("captures_extend_plies") is True
+    assert d2_forcing.get("captures_extend_plies") is True
+    assert d3_forcing.get("captures_extend_plies") is True
+    assert d1_forcing.get("captures_extend_limit") == 2
+    assert d2_forcing.get("captures_extend_limit") == 2
+    assert d3_forcing.get("captures_extend_limit") == 2
 
     board = Board()
     oracle_profile = next(profile for profile in profiles if profile["plies"] == 3 and profile["personality_name"] == "Classic")
@@ -529,6 +546,106 @@ def test_pawnwise_profile_heuristics_affect_evaluation():
     )
 
     assert pawnwise_score != classic_score
+
+
+def test_profile_position_bitmaps_load_per_piece_table():
+    profiles = get_ai_profiles()
+    expected_piece_tables = ("pawn", "knight", "bishop_white", "bishop_black", "rook", "queen", "king")
+    for profile in profiles:
+        position_multipliers = profile.get("position_multipliers")
+        assert position_multipliers is not None
+        for phase_name in ("opening", "endgame"):
+            assert phase_name in position_multipliers
+            for piece_type in expected_piece_tables:
+                assert piece_type in position_multipliers[phase_name]
+                assert len(position_multipliers[phase_name][piece_type]) == 64
+
+    basic = next(profile for profile in profiles if profile["id"] == "d2_basic")
+    pawnwise = next(profile for profile in profiles if profile["id"] == "d2_pawnwise")
+
+    assert len(set(basic["position_multipliers"]["opening"]["queen"])) == 1
+    assert basic["position_multipliers"]["opening"]["queen"][0] == 1.0
+    assert basic["position_multipliers"]["opening"]["queen"] == basic["position_multipliers"]["endgame"]["queen"]
+
+    pawnwise_queen = pawnwise["position_multipliers"]["opening"]["queen"]
+    pawnwise_rook = pawnwise["position_multipliers"]["opening"]["rook"]
+    pawnwise_bishop_white = pawnwise["position_multipliers"]["opening"]["bishop_white"]
+    pawnwise_bishop_black = pawnwise["position_multipliers"]["opening"]["bishop_black"]
+    assert pawnwise_queen[(3 * 8) + 3] > pawnwise_queen[0]
+    assert pawnwise_rook[0] > pawnwise_queen[0]
+    assert pawnwise_bishop_white != pawnwise_bishop_black
+
+
+def test_position_weight_transition_uses_material_phase():
+    piece_values = {
+        "pawn": 1.0,
+        "knight": 3.0,
+        "bishop": 3.0,
+        "rook": 5.0,
+        "queen": 9.0,
+        "king": 0.0,
+    }
+
+    opening_pawn_weights = [1.0] * 64
+    opening_pawn_weights[0] = 2.0
+    endgame_pawn_weights = [1.0] * 64
+    endgame_pawn_weights[0] = 4.0
+    neutral_weights = tuple([1.0] * 64)
+
+    position_multipliers = {
+        "opening": {
+            "pawn": tuple(opening_pawn_weights),
+            "knight": neutral_weights,
+            "bishop_white": neutral_weights,
+            "bishop_black": neutral_weights,
+            "rook": neutral_weights,
+            "queen": neutral_weights,
+            "king": neutral_weights,
+        },
+        "endgame": {
+            "pawn": tuple(endgame_pawn_weights),
+            "knight": neutral_weights,
+            "bishop_white": neutral_weights,
+            "bishop_black": neutral_weights,
+            "rook": neutral_weights,
+            "queen": neutral_weights,
+            "king": neutral_weights,
+        },
+    }
+
+    full_board = Board()
+    assert _opening_phase_ratio(full_board, piece_values) == 1.0
+
+    endgame_board = _empty_board()
+    _place(endgame_board, Pawn("white", (0, 0)))
+    endgame_material, endgame_heuristic = evaluate_position_scores(
+        endgame_board,
+        "white",
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+    assert endgame_material == 1.0
+    assert _opening_phase_ratio(endgame_board, piece_values) == 0.0
+    assert abs(endgame_heuristic - 3.0) < 1e-9
+
+    mixed_board = _empty_board()
+    _place(mixed_board, Pawn("white", (0, 0)))
+    _place(mixed_board, Queen("white", (7, 7)))
+    mixed_phase = _opening_phase_ratio(mixed_board, piece_values)
+    mixed_material, mixed_heuristic = evaluate_position_scores(
+        mixed_board,
+        "white",
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    expected_phase = (10.0 - 1.0) / (78.0 - 1.0)
+    expected_pawn_weight = (expected_phase * 2.0) + ((1.0 - expected_phase) * 4.0)
+    expected_pawn_heuristic = expected_pawn_weight - 1.0
+
+    assert mixed_material == 10.0
+    assert abs(mixed_phase - expected_phase) < 1e-9
+    assert abs(mixed_heuristic - expected_pawn_heuristic) < 1e-9
 
 
 def test_pawnwise_control_profile_drawish_opposite_bishops():
@@ -638,6 +755,116 @@ def test_minimax_prefers_material_over_heuristic():
     )
 
     assert move == ((3, 3), (0, 0))
+
+
+def test_forcing_capture_extension_does_not_consume_ply():
+    if not c_search_available():
+        return
+
+    board = _empty_board()
+    _place(board, King("white", (0, 0)))
+    _place(board, Queen("white", (3, 0)))
+    _place(board, King("black", (7, 7)))
+    _place(board, Rook("black", (3, 7)))
+    _place(board, Bishop("black", (6, 4)))
+
+    piece_values = {
+        "pawn": 1.0,
+        "knight": 3.0,
+        "bishop": 3.0,
+        "rook": 5.0,
+        "queen": 9.0,
+        "king": 0.0,
+    }
+
+    no_extension_move = choose_minimax_legal_move(
+        board.clone(),
+        "white",
+        1,
+        piece_values,
+        captures_extend_plies=False,
+    )
+    forcing_move = choose_minimax_legal_move(
+        board.clone(),
+        "white",
+        1,
+        piece_values,
+        captures_extend_plies=True,
+    )
+
+    assert no_extension_move == ((3, 0), (3, 7))
+    assert forcing_move is not None
+    assert forcing_move != ((3, 0), (3, 7))
+
+
+def test_forcing_profiles_make_legal_moves_on_first_three_halfmoves():
+    if not c_search_available():
+        return
+
+    profiles_by_id = {profile["id"]: profile for profile in get_ai_profiles()}
+    forcing_profile_ids = ("d1_pawnwise_forcing", "d2_pawnwise_forcing", "d3_pawnwise_forcing")
+
+    for profile_id in forcing_profile_ids:
+        board = Board()
+        active_color = "white"
+        cache_handle = create_c_search_cache()
+        try:
+            for _ in range(3):
+                legal_moves_before = set(board.get_legal_moves_for_color(active_color))
+                assert legal_moves_before, f"{profile_id} had no legal moves"
+
+                piece, from_pos, to_pos, _ = apply_ai_move(
+                    board,
+                    active_color,
+                    profiles_by_id[profile_id],
+                    search_cache_handle=cache_handle,
+                )
+                assert piece is not None
+                assert (from_pos, to_pos) in legal_moves_before
+                active_color = board.get_opponent_color(active_color)
+        finally:
+            destroy_c_search_cache(cache_handle)
+
+
+def test_forcing_profiles_complete_first_three_halfmoves_without_hanging():
+    if not c_search_available():
+        return
+
+    probe_script = """
+from chess import Board, apply_ai_move, create_c_search_cache, destroy_c_search_cache, get_ai_profiles
+
+profiles_by_id = {profile["id"]: profile for profile in get_ai_profiles()}
+forcing_profile_ids = ("d1_pawnwise_forcing", "d2_pawnwise_forcing", "d3_pawnwise_forcing")
+
+for profile_id in forcing_profile_ids:
+    board = Board()
+    active_color = "white"
+    cache_handle = create_c_search_cache()
+    try:
+        for _ in range(3):
+            piece, _from_pos, _to_pos, _move_text = apply_ai_move(
+                board,
+                active_color,
+                profiles_by_id[profile_id],
+                search_cache_handle=cache_handle,
+            )
+            if piece is None:
+                raise RuntimeError(f"{profile_id} failed to produce a move")
+            active_color = board.get_opponent_color(active_color)
+    finally:
+        destroy_c_search_cache(cache_handle)
+
+print("ok")
+"""
+
+    completed = subprocess.run(
+        ["python3", "-c", probe_script],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    assert completed.stdout.strip() == "ok"
 
 
 def test_pawnwise_control_profile_no_selective_second_ply_pruning():
@@ -921,6 +1148,38 @@ def test_pawnwise_fen_prefers_kg1_or_g2_for_shallow_depths():
             f"Expected Kg1 or a move from g2 at {plies} plies, got "
             f"{position_to_square(move[0])}{position_to_square(move[1])}"
         )
+
+
+def test_intermezzo_fen_prefers_qh5_for_ai_three_ply_and_above():
+    if not c_search_available():
+        return
+
+    fen_tokens = [
+        "fen",
+        "r1bqkbnr/1pp1p2p/p1n5/3p1pp1/4P3/2NB1Q2/PPPP1PPP/1RB1K1NR",
+        "w",
+        "Kk",
+        "-",
+        "0",
+        "10",
+    ]
+    board, active_color = parse_uci_position(fen_tokens)
+    assert active_color == "white"
+
+    expected_move = "f3h5"
+    profiles = [profile for profile in get_ai_profiles() if profile.get("plies", 0) >= 3]
+    assert profiles
+
+    mismatches = []
+    for profile in profiles:
+        move = choose_ai_move(board.clone(), active_color, profile, rng=random.Random(0))
+        move_square_text = "0000" if move is None else f"{position_to_square(move[0])}{position_to_square(move[1])}"
+        if move_square_text != expected_move:
+            mismatches.append(f"{profile['id']}({profile['plies']}):{move_square_text}")
+
+    assert not mismatches, (
+        f"Expected {expected_move} for all AI profiles >=3 plies, mismatches: {', '.join(mismatches)}"
+    )
 
 
 def test_c_search_cache_handle_reused_across_turns():
@@ -1223,9 +1482,14 @@ def run_all_tests():
         test_configure_game_menu_quit_option,
         test_play_match_ai_vs_ai_returns_terminal_status,
         test_pawnwise_profile_heuristics_affect_evaluation,
+        test_profile_position_bitmaps_load_per_piece_table,
+        test_position_weight_transition_uses_material_phase,
         test_pawnwise_control_profile_drawish_opposite_bishops,
         test_position_heuristics_are_tie_breakers_for_major_pieces,
         test_minimax_prefers_material_over_heuristic,
+        test_forcing_capture_extension_does_not_consume_ply,
+        test_forcing_profiles_make_legal_moves_on_first_three_halfmoves,
+        test_forcing_profiles_complete_first_three_halfmoves_without_hanging,
         test_pawnwise_control_profile_no_selective_second_ply_pruning,
         test_tournament_fixture_counts,
         test_tournament_tiebreaker_prefers_head_to_head_for_champion_tie,
@@ -1242,6 +1506,7 @@ def run_all_tests():
         test_c_piece_evaluation_matches_python_when_available,
         test_c_search_returns_legal_move_when_available,
         test_pawnwise_fen_prefers_kg1_or_g2_for_shallow_depths,
+        test_intermezzo_fen_prefers_qh5_for_ai_three_ply_and_above,
         test_c_search_cache_handle_reused_across_turns,
         test_parse_uci_position_startpos_with_moves_tracks_turn,
         test_uci_go_reports_score_info_line,

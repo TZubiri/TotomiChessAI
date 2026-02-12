@@ -1,9 +1,12 @@
 import re
 from datetime import datetime
+from functools import lru_cache
 import os
 import copy
 import random
 import ctypes
+
+from ai_positions import load_profile_position_bitmaps
 
 
 DEFAULT_SAVEFILE = "chess_save.pgn"
@@ -26,6 +29,7 @@ _C_EVAL_LIBRARY_HANDLE = None
 _C_SEARCH_FUNCTION = None
 _C_CREATE_SEARCH_CACHE_FUNCTION = None
 _C_DESTROY_SEARCH_CACHE_FUNCTION = None
+_C_EVAL_ARRAY_CACHE = {}
 
 AI_PERSONALITIES = [
     {
@@ -76,6 +80,38 @@ AI_DIFFICULTIES = [
 
 SPECIAL_AI_PROFILES = [
     {
+        "id": "d1_pawnwise_forcing",
+        "name": "Scout Pawnwise Forcing",
+        "plies": 1,
+        "personality_name": "Pawnwise Forcing",
+        "piece_values": {
+            "pawn": 1.0,
+            "knight": 3.0,
+            "bishop": 3.0,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 0.0,
+        },
+        "pawn_rank_values": {
+            5: 1.1,
+            6: 1.3,
+            7: 1.5,
+            8: 8.0,
+        },
+        "backward_pawn_value": 0.8,
+        "position_multipliers": {
+            "center": 1.3,
+            "center_cross": 1.2,
+            "center_diagonal": 1.15,
+            "corner": 0.8,
+            "corner_rook": 0.9,
+            "corner_touch": 0.85,
+            "corner_touch_rook": 0.95,
+        },
+        "captures_extend_plies": True,
+        "captures_extend_limit": 2,
+    },
+    {
         "id": "d2_pawnwise",
         "name": "Thinker Pawnwise",
         "plies": 2,
@@ -104,6 +140,38 @@ SPECIAL_AI_PROFILES = [
             "corner_touch": 0.85,
             "corner_touch_rook": 0.95,
         },
+    },
+    {
+        "id": "d2_pawnwise_forcing",
+        "name": "Thinker Pawnwise Forcing",
+        "plies": 2,
+        "personality_name": "Pawnwise Forcing",
+        "piece_values": {
+            "pawn": 1.0,
+            "knight": 3.0,
+            "bishop": 3.0,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 0.0,
+        },
+        "pawn_rank_values": {
+            5: 1.1,
+            6: 1.3,
+            7: 1.5,
+            8: 8.0,
+        },
+        "backward_pawn_value": 0.8,
+        "position_multipliers": {
+            "center": 1.3,
+            "center_cross": 1.2,
+            "center_diagonal": 1.15,
+            "corner": 0.8,
+            "corner_rook": 0.9,
+            "corner_touch": 0.85,
+            "corner_touch_rook": 0.95,
+        },
+        "captures_extend_plies": True,
+        "captures_extend_limit": 2,
     },
     {
         "id": "d2_pawnwise_control",
@@ -166,6 +234,38 @@ SPECIAL_AI_PROFILES = [
             "corner_touch": 0.85,
             "corner_touch_rook": 0.95,
         },
+    },
+    {
+        "id": "d3_pawnwise_forcing",
+        "name": "Oracle Pawnwise Forcing",
+        "plies": 3,
+        "personality_name": "Pawnwise Forcing",
+        "piece_values": {
+            "pawn": 1.0,
+            "knight": 3.0,
+            "bishop": 3.0,
+            "rook": 5.0,
+            "queen": 9.0,
+            "king": 0.0,
+        },
+        "pawn_rank_values": {
+            5: 1.1,
+            6: 1.3,
+            7: 1.5,
+            8: 8.0,
+        },
+        "backward_pawn_value": 0.8,
+        "position_multipliers": {
+            "center": 1.3,
+            "center_cross": 1.2,
+            "center_diagonal": 1.15,
+            "corner": 0.8,
+            "corner_rook": 0.9,
+            "corner_touch": 0.85,
+            "corner_touch_rook": 0.95,
+        },
+        "captures_extend_plies": True,
+        "captures_extend_limit": 2,
     },
     {
         "id": "d4_pawnwise",
@@ -236,6 +336,217 @@ RANDOM_AI_PROFILE = {
     "personality_name": "Random",
     "piece_values": AI_PERSONALITIES[0]["piece_values"],
 }
+
+POSITION_BITMAP_SQUARE_COUNT = 64
+POSITION_BITMAP_BASE53_NEUTRAL_INDEX = 26.0
+POSITION_PHASE_NAMES = ("opening", "endgame")
+POSITION_TABLE_ORDER = (
+    "pawn",
+    "knight",
+    "bishop_white",
+    "bishop_black",
+    "rook",
+    "queen",
+    "king",
+)
+STARTING_NON_KING_COUNTS = {
+    "pawn": 16,
+    "knight": 4,
+    "bishop": 4,
+    "rook": 4,
+    "queen": 2,
+}
+ENDGAME_MIN_PAWNS = 1
+_LEGACY_CENTER_SQUARES = {(3, 3), (4, 3), (3, 4), (4, 4)}
+_LEGACY_CENTER_CROSS_SQUARES = {(2, 3), (2, 4), (3, 2), (4, 2), (5, 3), (5, 4), (3, 5), (4, 5)}
+_LEGACY_CENTER_DIAGONAL_SQUARES = {(2, 2), (5, 2), (2, 5), (5, 5)}
+_LEGACY_CORNER_SQUARES = {(0, 0), (7, 0), (0, 7), (7, 7)}
+_LEGACY_CORNER_TOUCH_SQUARES = {(1, 0), (0, 1), (6, 0), (7, 1), (0, 6), (1, 7), (6, 7), (7, 6)}
+
+
+class PieceSquareTables(dict):
+    pass
+
+
+class PhasePositionTables(dict):
+    pass
+
+
+def _piece_square_tables_cache_key(piece_square_tables):
+    cache_key = getattr(piece_square_tables, "_cache_key", None)
+    if cache_key is None:
+        cache_key = tuple(piece_square_tables[piece_type] for piece_type in POSITION_TABLE_ORDER)
+        piece_square_tables._cache_key = cache_key
+    return cache_key
+
+
+def _phase_position_tables_cache_key(phase_tables):
+    cache_key = getattr(phase_tables, "_cache_key", None)
+    if cache_key is None:
+        cache_key = tuple(_piece_square_tables_cache_key(phase_tables[phase_name]) for phase_name in POSITION_PHASE_NAMES)
+        phase_tables._cache_key = cache_key
+    return cache_key
+
+
+@lru_cache(maxsize=None)
+def _decode_position_bitmap_bytes(bitmap_bytes):
+    if len(bitmap_bytes) != POSITION_BITMAP_SQUARE_COUNT:
+        raise ValueError(f"Expected {POSITION_BITMAP_SQUARE_COUNT} bitmap entries, got {len(bitmap_bytes)}")
+    return tuple(byte_value / POSITION_BITMAP_BASE53_NEUTRAL_INDEX for byte_value in bitmap_bytes)
+
+
+def _normalize_piece_square_values(piece_square_values):
+    if isinstance(piece_square_values, (bytes, bytearray)):
+        return _decode_position_bitmap_bytes(bytes(piece_square_values))
+
+    normalized_values = tuple(float(value) for value in piece_square_values)
+    if len(normalized_values) != POSITION_BITMAP_SQUARE_COUNT:
+        raise ValueError(
+            f"Expected {POSITION_BITMAP_SQUARE_COUNT} piece-square entries, got {len(normalized_values)}"
+        )
+    return normalized_values
+
+
+def _legacy_square_weight_for_piece_type(piece_type, square, position_multipliers):
+    if not position_multipliers:
+        return 1.0
+
+    if square in _LEGACY_CORNER_SQUARES:
+        if piece_type == "rook":
+            return position_multipliers.get("corner_rook", position_multipliers.get("corner", 1.0))
+        return position_multipliers.get("corner", 1.0)
+
+    if square in _LEGACY_CORNER_TOUCH_SQUARES:
+        if piece_type == "rook":
+            return position_multipliers.get("corner_touch_rook", position_multipliers.get("corner_touch", 1.0))
+        return position_multipliers.get("corner_touch", 1.0)
+
+    if square in _LEGACY_CENTER_SQUARES:
+        return position_multipliers.get("center", 1.0)
+
+    if square in _LEGACY_CENTER_CROSS_SQUARES:
+        return position_multipliers.get("center_cross", 1.0)
+
+    if square in _LEGACY_CENTER_DIAGONAL_SQUARES:
+        return position_multipliers.get("center_diagonal", 1.0)
+
+    return 1.0
+
+
+def _build_piece_square_tables_from_legacy_position_multipliers(position_multipliers):
+    piece_square_tables = PieceSquareTables()
+    for piece_type in POSITION_TABLE_ORDER:
+        legacy_piece_type = "bishop" if piece_type in {"bishop_white", "bishop_black"} else piece_type
+        weights = []
+        for row in range(8):
+            for col in range(8):
+                weights.append(
+                    float(_legacy_square_weight_for_piece_type(legacy_piece_type, (col, row), position_multipliers))
+                )
+        piece_square_tables[piece_type] = tuple(weights)
+    return piece_square_tables
+
+
+def _build_phase_position_tables(opening_tables, endgame_tables):
+    phase_tables = PhasePositionTables()
+    phase_tables["opening"] = opening_tables
+    phase_tables["endgame"] = endgame_tables
+    _phase_position_tables_cache_key(phase_tables)
+    return phase_tables
+
+
+def _is_piece_square_table_mapping(position_multipliers):
+    if not isinstance(position_multipliers, dict):
+        return False
+
+    has_all_position_tables = all(piece_type in position_multipliers for piece_type in POSITION_TABLE_ORDER)
+    has_legacy_piece_tables = all(piece_type in position_multipliers for piece_type in PIECE_ORDER)
+    return has_all_position_tables or has_legacy_piece_tables
+
+
+def _is_phase_position_mapping(position_multipliers):
+    return isinstance(position_multipliers, dict) and all(phase_name in position_multipliers for phase_name in POSITION_PHASE_NAMES)
+
+
+def _normalize_piece_square_tables(position_multipliers):
+    piece_square_tables = PieceSquareTables()
+    bishop_fallback = position_multipliers.get("bishop") if isinstance(position_multipliers, dict) else None
+    for piece_type in POSITION_TABLE_ORDER:
+        piece_square_values = position_multipliers.get(piece_type)
+        if piece_square_values is None and piece_type in {"bishop_white", "bishop_black"}:
+            piece_square_values = bishop_fallback
+        if piece_square_values is None:
+            raise ValueError(f"Missing piece-square table for '{piece_type}'")
+        piece_square_tables[piece_type] = _normalize_piece_square_values(piece_square_values)
+    _piece_square_tables_cache_key(piece_square_tables)
+    return piece_square_tables
+
+
+def _normalize_position_multipliers(position_multipliers):
+    if not position_multipliers:
+        return None
+
+    if isinstance(position_multipliers, PhasePositionTables):
+        return position_multipliers
+
+    if isinstance(position_multipliers, PieceSquareTables):
+        return _build_phase_position_tables(position_multipliers, position_multipliers)
+
+    if _is_phase_position_mapping(position_multipliers):
+        opening_tables = _normalize_piece_square_tables(position_multipliers["opening"])
+        endgame_tables = _normalize_piece_square_tables(position_multipliers["endgame"])
+        return _build_phase_position_tables(opening_tables, endgame_tables)
+
+    if _is_piece_square_table_mapping(position_multipliers):
+        piece_square_tables = _normalize_piece_square_tables(position_multipliers)
+        return _build_phase_position_tables(piece_square_tables, piece_square_tables)
+
+    if isinstance(position_multipliers, dict):
+        piece_square_tables = _build_piece_square_tables_from_legacy_position_multipliers(position_multipliers)
+        return _build_phase_position_tables(piece_square_tables, piece_square_tables)
+
+    raise ValueError("Position multipliers must be phase tables, piece tables, or legacy zone multipliers")
+
+
+@lru_cache(maxsize=None)
+def _profile_position_multipliers(profile_id):
+    raw_position_bitmaps = load_profile_position_bitmaps(profile_id)
+    return _normalize_position_multipliers(raw_position_bitmaps)
+
+
+def _profile_with_position_multipliers(profile):
+    profile_with_positions = dict(profile)
+    profile_with_positions["position_multipliers"] = _profile_position_multipliers(profile_with_positions["id"])
+    return profile_with_positions
+
+
+def _current_non_king_material(board, piece_values):
+    total = 0.0
+    for piece in board.pieces:
+        piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
+        if piece_type == "king":
+            continue
+        total += float(piece_values[piece_type])
+    return total
+
+
+def _opening_material_total(piece_values):
+    return sum(float(piece_values[piece_type]) * count for piece_type, count in STARTING_NON_KING_COUNTS.items())
+
+
+def _endgame_material_total(piece_values):
+    return float(piece_values["pawn"]) * ENDGAME_MIN_PAWNS
+
+
+def _opening_phase_ratio(board, piece_values):
+    opening_material = _opening_material_total(piece_values)
+    endgame_material = _endgame_material_total(piece_values)
+    if opening_material <= endgame_material:
+        return 1.0
+
+    current_material = _current_non_king_material(board, piece_values)
+    ratio = (current_material - endgame_material) / (opening_material - endgame_material)
+    return max(0.0, min(1.0, ratio))
 
 
 def square_to_position(square):
@@ -478,10 +789,11 @@ def move_text_to_algebraic(board, color, move_text):
 
 
 def get_ai_profiles():
-    profiles = [RANDOM_AI_PROFILE]
+    profiles = [_profile_with_position_multipliers(RANDOM_AI_PROFILE)]
     for difficulty in AI_DIFFICULTIES:
         for personality in AI_PERSONALITIES:
             profiles.append(
+                _profile_with_position_multipliers(
                 {
                     "id": f"d{difficulty['plies']}_{personality['id']}",
                     "name": f"{difficulty['name']} {personality['name']}",
@@ -489,8 +801,9 @@ def get_ai_profiles():
                     "personality_name": personality["name"],
                     "piece_values": personality["piece_values"],
                 }
+                )
             )
-    profiles.extend(SPECIAL_AI_PROFILES)
+    profiles.extend(_profile_with_position_multipliers(profile) for profile in SPECIAL_AI_PROFILES)
     return profiles
 
 
@@ -582,38 +895,52 @@ def _build_c_piece_arrays(board, include_moved=False):
 
 
 def _build_c_eval_arrays(piece_values, pawn_rank_values=None, backward_pawn_value=None, position_multipliers=None):
-    ordered_piece_values = [float(piece_values[piece_type]) for piece_type in PIECE_ORDER]
-    piece_value_array = (ctypes.c_double * len(PIECE_ORDER))(*ordered_piece_values)
+    ordered_piece_values = tuple(float(piece_values[piece_type]) for piece_type in PIECE_ORDER)
 
     has_pawn_rank_values = 1 if pawn_rank_values else 0
     if pawn_rank_values:
         pawn_base_value = float(piece_values["pawn"])
-        pawn_rank_entries = [0.0] + [float(pawn_rank_values.get(rank, pawn_base_value)) for rank in range(1, 9)]
+        pawn_rank_entries = tuple([0.0] + [float(pawn_rank_values.get(rank, pawn_base_value)) for rank in range(1, 9)])
     else:
-        pawn_rank_entries = [0.0] * 9
-    pawn_rank_array = (ctypes.c_double * 9)(*pawn_rank_entries)
+        pawn_rank_entries = tuple([0.0] * 9)
 
     has_backward_pawn_value = 1 if backward_pawn_value is not None else 0
     backward_pawn_entry = float(backward_pawn_value) if backward_pawn_value is not None else 0.0
 
-    has_position_multipliers = 1 if position_multipliers else 0
-    if position_multipliers:
-        corner_value = float(position_multipliers.get("corner", 1.0))
-        corner_touch_value = float(position_multipliers.get("corner_touch", 1.0))
-        position_entries = [
-            float(position_multipliers.get("center", 1.0)),
-            float(position_multipliers.get("center_cross", 1.0)),
-            float(position_multipliers.get("center_diagonal", 1.0)),
-            corner_value,
-            float(position_multipliers.get("corner_rook", corner_value)),
-            corner_touch_value,
-            float(position_multipliers.get("corner_touch_rook", corner_touch_value)),
-        ]
+    normalized_position_multipliers = _normalize_position_multipliers(position_multipliers)
+    has_position_multipliers = 1 if normalized_position_multipliers else 0
+    if normalized_position_multipliers:
+        position_entries = tuple(
+            value
+            for phase_name in POSITION_PHASE_NAMES
+            for piece_type in POSITION_TABLE_ORDER
+            for value in normalized_position_multipliers[phase_name][piece_type]
+        )
+        position_cache_key = _phase_position_tables_cache_key(normalized_position_multipliers)
     else:
-        position_entries = [1.0] * 7
-    position_array = (ctypes.c_double * 7)(*position_entries)
+        position_entries = tuple(
+            [1.0] * (len(POSITION_PHASE_NAMES) * len(POSITION_TABLE_ORDER) * POSITION_BITMAP_SQUARE_COUNT)
+        )
+        position_cache_key = None
 
-    return (
+    cache_key = (
+        ordered_piece_values,
+        pawn_rank_entries,
+        has_pawn_rank_values,
+        backward_pawn_entry,
+        has_backward_pawn_value,
+        position_cache_key,
+        has_position_multipliers,
+    )
+    cached_arrays = _C_EVAL_ARRAY_CACHE.get(cache_key)
+    if cached_arrays is not None:
+        return cached_arrays
+
+    piece_value_array = (ctypes.c_double * len(PIECE_ORDER))(*ordered_piece_values)
+    pawn_rank_array = (ctypes.c_double * 9)(*pawn_rank_entries)
+    position_array = (ctypes.c_double * len(position_entries))(*position_entries)
+
+    eval_arrays = (
         piece_value_array,
         pawn_rank_array,
         has_pawn_rank_values,
@@ -622,6 +949,10 @@ def _build_c_eval_arrays(piece_values, pawn_rank_values=None, backward_pawn_valu
         position_array,
         has_position_multipliers,
     )
+    if len(_C_EVAL_ARRAY_CACHE) >= 128:
+        _C_EVAL_ARRAY_CACHE.clear()
+    _C_EVAL_ARRAY_CACHE[cache_key] = eval_arrays
+    return eval_arrays
 
 
 def _load_c_search_function():
@@ -657,6 +988,8 @@ def _load_c_search_function():
         ctypes.c_int,
         ctypes.c_double,
         ctypes.c_double,
+        ctypes.c_int,
+        ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
@@ -735,6 +1068,8 @@ def _choose_minimax_legal_move_c(
     position_multipliers=None,
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
+    captures_extend_plies=False,
+    captures_extend_limit=None,
     search_cache_handle=None,
 ):
     if plies <= 0:
@@ -793,6 +1128,8 @@ def _choose_minimax_legal_move_c(
         float(control_weight),
         float(opposite_bishop_draw_factor if opposite_bishop_draw_factor is not None else 1.0),
         1 if opposite_bishop_draw_factor is not None else 0,
+        1 if captures_extend_plies else 0,
+        int(captures_extend_limit) if captures_extend_limit is not None else -1,
         en_passant_target_col,
         en_passant_target_row,
         en_passant_capture_col,
@@ -1571,6 +1908,18 @@ def _is_en_passant_capture_move(board, piece, to_position):
     )
 
 
+def _is_capture_move(board, from_position, to_position):
+    piece = board.get_piece_at(from_position)
+    if piece is None:
+        return False
+
+    target_piece = board.get_piece_at(to_position)
+    if target_piece is not None and target_piece.color != piece.color:
+        return True
+
+    return _is_en_passant_capture_move(board, piece, to_position)
+
+
 def _resolve_promotion_choice(piece, to_position, promotion_piece):
     to_row = to_position[1]
     reaches_promotion_rank = isinstance(piece, Pawn) and to_row in (0, 7)
@@ -1671,49 +2020,35 @@ def _is_backward_pawn(board, pawn):
     return False
 
 
-def _square_weight_for_piece(piece, square, position_multipliers):
+def _square_weight_for_piece(piece, square, position_multipliers, opening_phase):
     if not position_multipliers:
         return 1.0
 
+    piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
+    if piece_type == "bishop":
+        table_piece_type = "bishop_white" if piece.color == "white" else "bishop_black"
+    else:
+        table_piece_type = piece_type
+
     col, row = square
-    center_squares = {(3, 3), (4, 3), (3, 4), (4, 4)}
-    center_cross_squares = {(2, 3), (2, 4), (3, 2), (4, 2), (5, 3), (5, 4), (3, 5), (4, 5)}
-    center_diagonal_squares = {(2, 2), (5, 2), (2, 5), (5, 5)}
-    corner_squares = {(0, 0), (7, 0), (0, 7), (7, 7)}
-    corner_touch_squares = {(1, 0), (0, 1), (6, 0), (7, 1), (0, 6), (1, 7), (6, 7), (7, 6)}
-
-    if (col, row) in corner_squares:
-        if isinstance(piece, Rook):
-            return position_multipliers.get("corner_rook", position_multipliers.get("corner", 1.0))
-        return position_multipliers.get("corner", 1.0)
-
-    if (col, row) in corner_touch_squares:
-        if isinstance(piece, Rook):
-            return position_multipliers.get("corner_touch_rook", position_multipliers.get("corner_touch", 1.0))
-        return position_multipliers.get("corner_touch", 1.0)
-
-    if (col, row) in center_squares:
-        return position_multipliers.get("center", 1.0)
-
-    if (col, row) in center_cross_squares:
-        return position_multipliers.get("center_cross", 1.0)
-
-    if (col, row) in center_diagonal_squares:
-        return position_multipliers.get("center_diagonal", 1.0)
-
-    return 1.0
+    square_index = (row * 8) + col
+    opening_weights = position_multipliers["opening"][table_piece_type]
+    endgame_weights = position_multipliers["endgame"][table_piece_type]
+    opening_weight = opening_weights[square_index]
+    endgame_weight = endgame_weights[square_index]
+    return (opening_phase * opening_weight) + ((1.0 - opening_phase) * endgame_weight)
 
 
-def _position_multiplier(piece, position_multipliers):
-    return _square_weight_for_piece(piece, piece.position, position_multipliers)
+def _position_multiplier(piece, position_multipliers, opening_phase):
+    return _square_weight_for_piece(piece, piece.position, position_multipliers, opening_phase)
 
 
-def _control_score(board, perspective_color, position_multipliers):
+def _control_score(board, perspective_color, position_multipliers, opening_phase):
     total = 0.0
     for piece in board.pieces:
         controlled = 0.0
         for square in piece.get_legal_moves(board):
-            controlled += _square_weight_for_piece(piece, square, position_multipliers)
+            controlled += _square_weight_for_piece(piece, square, position_multipliers, opening_phase)
         if piece.color == perspective_color:
             total += controlled
         else:
@@ -1739,6 +2074,7 @@ def _evaluate_piece_scores(
     pawn_rank_values=None,
     backward_pawn_value=None,
     position_multipliers=None,
+    opening_phase=1.0,
 ):
     piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
     material_score = piece_values[piece_type]
@@ -1751,7 +2087,7 @@ def _evaluate_piece_scores(
         if backward_pawn_value is not None and _is_backward_pawn(board, piece):
             piece_score = min(piece_score, backward_pawn_value)
 
-    piece_score *= _position_multiplier(piece, position_multipliers)
+    piece_score *= _position_multiplier(piece, position_multipliers, opening_phase)
     heuristic_score = piece_score - material_score
     return material_score, heuristic_score
 
@@ -1764,6 +2100,8 @@ def _evaluate_position_scores_python_base(
     backward_pawn_value=None,
     position_multipliers=None,
 ):
+    normalized_position_multipliers = _normalize_position_multipliers(position_multipliers)
+    opening_phase = _opening_phase_ratio(board, piece_values)
     material_score = 0.0
     heuristic_score = 0.0
     for piece in board.pieces:
@@ -1773,7 +2111,8 @@ def _evaluate_position_scores_python_base(
             piece_values,
             pawn_rank_values=pawn_rank_values,
             backward_pawn_value=backward_pawn_value,
-            position_multipliers=position_multipliers,
+            position_multipliers=normalized_position_multipliers,
+            opening_phase=opening_phase,
         )
         if piece.color == perspective_color:
             material_score += piece_material
@@ -1795,20 +2134,23 @@ def evaluate_position_scores(
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
 ):
+    normalized_position_multipliers = _normalize_position_multipliers(position_multipliers)
+    opening_phase = _opening_phase_ratio(board, piece_values)
     material_score, heuristic_score = _evaluate_position_scores_c_base(
         board,
         perspective_color,
         piece_values,
         pawn_rank_values=pawn_rank_values,
         backward_pawn_value=backward_pawn_value,
-        position_multipliers=position_multipliers,
+        position_multipliers=normalized_position_multipliers,
     )
 
     if control_weight:
         heuristic_score += control_weight * _control_score(
             board,
             perspective_color,
-            position_multipliers,
+            normalized_position_multipliers,
+            opening_phase,
         )
 
     if opposite_bishop_draw_factor is not None and _has_opposite_color_bishops(board):
@@ -1851,13 +2193,34 @@ def minimax_score(
     position_multipliers=None,
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
+    captures_extend_plies=False,
+    captures_extend_limit=None,
+    captures_extension_budget=None,
 ):
+    if captures_extension_budget is None:
+        captures_extension_budget = captures_extend_limit
+
     status = get_game_status(board, active_color)
     if status["winner"] is not None:
         return (100000.0, 0.0) if status["winner"] == perspective_color else (-100000.0, 0.0)
     if status["state"] == "draw":
         return 0.0, 0.0
-    if remaining_plies <= 0:
+
+    has_extension_budget = captures_extension_budget is None or captures_extension_budget > 0
+    capture_only_extension = captures_extend_plies and remaining_plies <= 0 and has_extension_budget
+    if remaining_plies <= 0 and not captures_extend_plies:
+        return evaluate_position_scores(
+            board,
+            perspective_color,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        )
+
+    if remaining_plies <= 0 and not capture_only_extension:
         return evaluate_position_scores(
             board,
             perspective_color,
@@ -1870,6 +2233,25 @@ def minimax_score(
         )
 
     legal_moves = board.get_legal_moves_for_color(active_color)
+    if capture_only_extension:
+        legal_moves = [
+            move
+            for move in legal_moves
+            if _is_capture_move(board, move[0], move[1])
+        ]
+
+    if not legal_moves:
+        return evaluate_position_scores(
+            board,
+            perspective_color,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        )
+
     next_color = board.get_opponent_color(active_color)
 
     if active_color == perspective_color:
@@ -1877,17 +2259,27 @@ def minimax_score(
         for from_pos, to_pos in legal_moves:
             simulation = board.clone()
             simulation.move_piece(from_pos, to_pos)
+            move_is_capture = _is_capture_move(board, from_pos, to_pos)
+            next_plies = remaining_plies - 1
+            next_extension_budget = captures_extension_budget
+            if capture_only_extension and move_is_capture:
+                next_plies = remaining_plies
+                if next_extension_budget is not None:
+                    next_extension_budget -= 1
             score = minimax_score(
                 simulation,
                 next_color,
                 perspective_color,
-                remaining_plies - 1,
+                next_plies,
                 piece_values,
                 pawn_rank_values=pawn_rank_values,
                 backward_pawn_value=backward_pawn_value,
                 position_multipliers=position_multipliers,
                 control_weight=control_weight,
                 opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+                captures_extend_plies=captures_extend_plies,
+                captures_extend_limit=captures_extend_limit,
+                captures_extension_budget=next_extension_budget,
             )
             if score > best_score:
                 best_score = score
@@ -1897,17 +2289,27 @@ def minimax_score(
     for from_pos, to_pos in legal_moves:
         simulation = board.clone()
         simulation.move_piece(from_pos, to_pos)
+        move_is_capture = _is_capture_move(board, from_pos, to_pos)
+        next_plies = remaining_plies - 1
+        next_extension_budget = captures_extension_budget
+        if capture_only_extension and move_is_capture:
+            next_plies = remaining_plies
+            if next_extension_budget is not None:
+                next_extension_budget -= 1
         score = minimax_score(
             simulation,
             next_color,
             perspective_color,
-            remaining_plies - 1,
+            next_plies,
             piece_values,
             pawn_rank_values=pawn_rank_values,
             backward_pawn_value=backward_pawn_value,
             position_multipliers=position_multipliers,
             control_weight=control_weight,
             opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+            captures_extend_plies=captures_extend_plies,
+            captures_extend_limit=captures_extend_limit,
+            captures_extension_budget=next_extension_budget,
         )
         if score < best_score:
             best_score = score
@@ -1934,6 +2336,8 @@ def choose_minimax_legal_move(
     position_multipliers=None,
     control_weight=0.0,
     opposite_bishop_draw_factor=None,
+    captures_extend_plies=False,
+    captures_extend_limit=None,
     search_cache_handle=None,
 ):
     legal_moves = board.get_legal_moves_for_color(color)
@@ -1953,6 +2357,8 @@ def choose_minimax_legal_move(
         position_multipliers=position_multipliers,
         control_weight=control_weight,
         opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        captures_extend_plies=captures_extend_plies,
+        captures_extend_limit=captures_extend_limit,
         search_cache_handle=search_cache_handle,
     )
     return c_move
@@ -1972,6 +2378,8 @@ def choose_ai_move(board, color, ai_profile, rng=None):
         position_multipliers=ai_profile.get("position_multipliers"),
         control_weight=ai_profile.get("control_weight", 0.0),
         opposite_bishop_draw_factor=ai_profile.get("opposite_bishop_draw_factor"),
+        captures_extend_plies=ai_profile.get("captures_extend_plies", False),
+        captures_extend_limit=ai_profile.get("captures_extend_limit"),
         search_cache_handle=ai_profile.get("search_cache_handle"),
     )
 
