@@ -191,7 +191,9 @@ static double square_weight_for_piece(
             return 1.0;
     }
 
-    size_t square_offset = ((size_t)row * 8) + (size_t)col;
+    int mapped_col = 7 - col;
+    int mapped_row = piece_color == 0 ? row : 7 - row;
+    size_t square_offset = ((size_t)mapped_row * 8) + (size_t)mapped_col;
     size_t opening_offset = ((size_t)table_index * 64) + square_offset;
     size_t endgame_offset = (size_t)PHASE_TABLE_SIZE + ((size_t)table_index * 64) + square_offset;
 

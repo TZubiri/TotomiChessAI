@@ -617,7 +617,7 @@ def test_position_weight_transition_uses_material_phase():
     assert _opening_phase_ratio(full_board, piece_values) == 1.0
 
     endgame_board = _empty_board()
-    _place(endgame_board, Pawn("white", (0, 0)))
+    _place(endgame_board, Pawn("white", (7, 0)))
     endgame_material, endgame_heuristic = evaluate_position_scores(
         endgame_board,
         "white",
@@ -629,7 +629,7 @@ def test_position_weight_transition_uses_material_phase():
     assert abs(endgame_heuristic - 3.0) < 1e-9
 
     mixed_board = _empty_board()
-    _place(mixed_board, Pawn("white", (0, 0)))
+    _place(mixed_board, Pawn("white", (7, 0)))
     _place(mixed_board, Queen("white", (7, 7)))
     mixed_phase = _opening_phase_ratio(mixed_board, piece_values)
     mixed_material, mixed_heuristic = evaluate_position_scores(
@@ -646,6 +646,73 @@ def test_position_weight_transition_uses_material_phase():
     assert mixed_material == 10.0
     assert abs(mixed_phase - expected_phase) < 1e-9
     assert abs(mixed_heuristic - expected_pawn_heuristic) < 1e-9
+
+
+def test_position_bitmap_orientation_uses_kingside_left_and_own_home_top():
+    piece_values = {
+        "pawn": 1.0,
+        "knight": 3.0,
+        "bishop": 3.0,
+        "rook": 5.0,
+        "queen": 9.0,
+        "king": 0.0,
+    }
+
+    focused_pawn_weights = [1.0] * 64
+    focused_pawn_weights[0] = 2.0
+    neutral_weights = tuple([1.0] * 64)
+
+    position_multipliers = {
+        "opening": {
+            "pawn": tuple(focused_pawn_weights),
+            "knight": neutral_weights,
+            "bishop_white": neutral_weights,
+            "bishop_black": neutral_weights,
+            "rook": neutral_weights,
+            "queen": neutral_weights,
+            "king": neutral_weights,
+        },
+        "endgame": {
+            "pawn": tuple(focused_pawn_weights),
+            "knight": neutral_weights,
+            "bishop_white": neutral_weights,
+            "bishop_black": neutral_weights,
+            "rook": neutral_weights,
+            "queen": neutral_weights,
+            "king": neutral_weights,
+        },
+    }
+
+    white_home_kingside = _empty_board()
+    _place(white_home_kingside, Pawn("white", (7, 0)))
+    _, white_heuristic = evaluate_position_scores(
+        white_home_kingside,
+        "white",
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    black_home_kingside = _empty_board()
+    _place(black_home_kingside, Pawn("black", (7, 7)))
+    _, black_heuristic = evaluate_position_scores(
+        black_home_kingside,
+        "black",
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    white_home_queenside = _empty_board()
+    _place(white_home_queenside, Pawn("white", (0, 0)))
+    _, white_queenside_heuristic = evaluate_position_scores(
+        white_home_queenside,
+        "white",
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    assert abs(white_heuristic - 1.0) < 1e-9
+    assert abs(black_heuristic - 1.0) < 1e-9
+    assert abs(white_queenside_heuristic) < 1e-9
 
 
 def test_pawnwise_control_profile_drawish_opposite_bishops():
@@ -1484,6 +1551,7 @@ def run_all_tests():
         test_pawnwise_profile_heuristics_affect_evaluation,
         test_profile_position_bitmaps_load_per_piece_table,
         test_position_weight_transition_uses_material_phase,
+        test_position_bitmap_orientation_uses_kingside_left_and_own_home_top,
         test_pawnwise_control_profile_drawish_opposite_bishops,
         test_position_heuristics_are_tie_breakers_for_major_pieces,
         test_minimax_prefers_material_over_heuristic,
