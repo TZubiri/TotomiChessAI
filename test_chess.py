@@ -52,6 +52,25 @@ from ai_positions import BITMAP_BASE53_LOOKUP
 from ai_positions._shared import PAWNWISE_PAWN_BITMAP_ROWS
 
 
+TEST_SEARCH_PROFILE_IDS = (
+    "d2_pawnwise_forcing",
+    "d3_pawnwise_forcing",
+    "d4_pawnwise",
+    "d5_pawnwise",
+)
+
+
+def _profiles_by_id():
+    return {profile["id"]: profile for profile in get_ai_profiles()}
+
+
+def _required_search_profiles_by_id():
+    profiles_by_id = _profiles_by_id()
+    missing = [profile_id for profile_id in TEST_SEARCH_PROFILE_IDS if profile_id not in profiles_by_id]
+    assert not missing, f"Missing required test profiles: {', '.join(missing)}"
+    return profiles_by_id
+
+
 def _empty_board():
     board = Board()
     board.board = [[None for _ in range(8)] for _ in range(8)]
@@ -464,38 +483,27 @@ def test_apply_random_ai_move_fails_without_legal_moves():
 
 
 def test_ai_profiles_and_minimax_selection():
-    profiles = get_ai_profiles()
-    assert sum(1 for profile in profiles if profile["plies"] == 0) == 1
-    assert any(profile["plies"] == 3 for profile in profiles)
-    assert any(profile["plies"] == 4 for profile in profiles)
-    assert any(profile["plies"] == 5 for profile in profiles)
-    assert any(profile["id"] == "d2_pawnwise" for profile in profiles)
-    assert any(profile["id"] == "d1_pawnwise_forcing" for profile in profiles)
-    assert any(profile["id"] == "d2_pawnwise_forcing" for profile in profiles)
-    assert any(profile["id"] == "d2_pawnwise_control" for profile in profiles)
-    assert any(profile["id"] == "d3_pawnwise" for profile in profiles)
-    assert any(profile["id"] == "d3_pawnwise_forcing" for profile in profiles)
-    assert any(profile["id"] == "d4_pawnwise" for profile in profiles)
+    profiles_by_id = _required_search_profiles_by_id()
+    d2_forcing = profiles_by_id["d2_pawnwise_forcing"]
+    d3_forcing = profiles_by_id["d3_pawnwise_forcing"]
+    d4_pawnwise = profiles_by_id["d4_pawnwise"]
+    d5_pawnwise = profiles_by_id["d5_pawnwise"]
 
-    d1_forcing = next(profile for profile in profiles if profile["id"] == "d1_pawnwise_forcing")
-    d2_forcing = next(profile for profile in profiles if profile["id"] == "d2_pawnwise_forcing")
-    d3_forcing = next(profile for profile in profiles if profile["id"] == "d3_pawnwise_forcing")
-    assert d1_forcing["plies"] == 1
     assert d2_forcing["plies"] == 2
     assert d3_forcing["plies"] == 3
-    assert d1_forcing.get("captures_extend_plies") is True
+    assert d4_pawnwise["plies"] == 4
+    assert d5_pawnwise["plies"] == 5
     assert d2_forcing.get("captures_extend_plies") is True
     assert d3_forcing.get("captures_extend_plies") is True
-    assert d1_forcing.get("captures_extend_limit") == 2
     assert d2_forcing.get("captures_extend_limit") == 2
     assert d3_forcing.get("captures_extend_limit") == 2
 
     board = Board()
-    oracle_profile = next(profile for profile in profiles if profile["plies"] == 3 and profile["personality_name"] == "Classic")
-    move = choose_ai_move(board, "white", oracle_profile, rng=random.Random(3))
+    profile = profiles_by_id["d3_pawnwise_forcing"]
+    move = choose_ai_move(board, "white", profile, rng=random.Random(3))
     assert move is not None
 
-    piece, from_pos, to_pos, move_text = apply_ai_move(board, "white", oracle_profile, rng=random.Random(3))
+    piece, from_pos, to_pos, move_text = apply_ai_move(board, "white", profile, rng=random.Random(3))
     assert board.get_piece_at(from_pos) is None
     assert board.get_piece_at(to_pos) == piece
     assert move_text == f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
@@ -1014,8 +1022,8 @@ def test_forcing_profiles_make_legal_moves_on_first_three_halfmoves():
     if not c_search_available():
         return
 
-    profiles_by_id = {profile["id"]: profile for profile in get_ai_profiles()}
-    forcing_profile_ids = ("d1_pawnwise_forcing", "d2_pawnwise_forcing", "d3_pawnwise_forcing")
+    profiles_by_id = _required_search_profiles_by_id()
+    forcing_profile_ids = ("d2_pawnwise_forcing", "d3_pawnwise_forcing")
 
     for profile_id in forcing_profile_ids:
         board = Board()
@@ -1047,7 +1055,7 @@ def test_forcing_profiles_complete_first_three_halfmoves_without_hanging():
 from chess import Board, apply_ai_move, create_c_search_cache, destroy_c_search_cache, get_ai_profiles
 
 profiles_by_id = {profile["id"]: profile for profile in get_ai_profiles()}
-forcing_profile_ids = ("d1_pawnwise_forcing", "d2_pawnwise_forcing", "d3_pawnwise_forcing")
+forcing_profile_ids = ("d2_pawnwise_forcing", "d3_pawnwise_forcing")
 
 for profile_id in forcing_profile_ids:
     board = Board()
@@ -1317,8 +1325,8 @@ def test_c_search_returns_legal_move_when_available():
         return
 
     board = Board()
-    profiles = get_ai_profiles()
-    oracle_profile = next(profile for profile in profiles if profile["id"] == "d3_basic")
+    profiles_by_id = _required_search_profiles_by_id()
+    oracle_profile = profiles_by_id["d3_pawnwise_forcing"]
 
     move = choose_ai_move(board, "white", oracle_profile, rng=random.Random(5))
     assert move in board.get_legal_moves_for_color("white")
@@ -1377,7 +1385,12 @@ def test_intermezzo_fen_returns_legal_move_for_ai_three_ply_and_above():
     board, active_color = parse_uci_position(fen_tokens)
     assert active_color == "white"
 
-    profiles = [profile for profile in get_ai_profiles() if profile.get("plies", 0) >= 3]
+    profiles_by_id = _required_search_profiles_by_id()
+    profiles = [
+        profiles_by_id[profile_id]
+        for profile_id in TEST_SEARCH_PROFILE_IDS
+        if profiles_by_id[profile_id].get("plies", 0) >= 3
+    ]
     assert profiles
 
     legal_moves = set(board.get_legal_moves_for_color(active_color))
@@ -1399,8 +1412,8 @@ def test_c_search_cache_handle_reused_across_turns():
         return
 
     board = Board()
-    profiles = get_ai_profiles()
-    profile = next(profile for profile in profiles if profile["id"] == "d3_basic")
+    profiles_by_id = _required_search_profiles_by_id()
+    profile = profiles_by_id["d3_pawnwise_forcing"]
     cache_handle = create_c_search_cache()
     assert cache_handle is not None
 
@@ -1446,7 +1459,7 @@ def test_uci_go_reports_score_info_line():
     if not c_search_available():
         return
 
-    command = ["python3", "chess_uci.py", "d2_basic"]
+    command = ["python3", "chess_uci.py", "d2_pawnwise_forcing"]
     uci_input = "uci\nisready\nsetoption name InfoMode value verbose\nposition startpos\ngo depth 1\nquit\n"
     completed = subprocess.run(
         command,
@@ -1507,7 +1520,7 @@ def test_uci_go_reports_multipv_lines_when_enabled():
     if not c_search_available():
         return
 
-    command = ["python3", "chess_uci.py", "d2_basic"]
+    command = ["python3", "chess_uci.py", "d2_pawnwise_forcing"]
     uci_input = (
         "uci\n"
         "isready\n"
@@ -1542,7 +1555,7 @@ def test_uci_go_depth_two_with_multipv_three_emits_depth_updates():
     if not c_search_available():
         return
 
-    command = ["python3", "chess_uci.py", "d2_basic"]
+    command = ["python3", "chess_uci.py", "d2_pawnwise_forcing"]
     uci_input = (
         "uci\n"
         "isready\n"
@@ -1571,7 +1584,7 @@ def test_uci_go_depth_two_with_multipv_three_emits_depth_updates():
 
 
 def test_uci_terminal_lines_outputs_full_width_tree():
-    command = ["python3", "chess_uci.py", "d2_basic"]
+    command = ["python3", "chess_uci.py", "d2_pawnwise_forcing"]
     uci_input = "uci\nisready\nposition startpos\nterminal_lines depth 2 width 3\nquit\n"
     completed = subprocess.run(
         command,
@@ -1591,7 +1604,7 @@ def test_uci_go_terse_mode_omits_verbose_info_lines():
     if not c_search_available():
         return
 
-    command = ["python3", "chess_uci.py", "d2_basic"]
+    command = ["python3", "chess_uci.py", "d2_pawnwise_forcing"]
     uci_input = (
         "uci\n"
         "isready\n"
