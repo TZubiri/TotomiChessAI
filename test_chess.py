@@ -495,8 +495,8 @@ def test_ai_profiles_and_minimax_selection():
     assert d5_pawnwise["plies"] == 5
     assert d2_forcing.get("captures_extend_plies") is True
     assert d3_forcing.get("captures_extend_plies") is True
-    assert d2_forcing.get("captures_extend_limit") == 2
-    assert d3_forcing.get("captures_extend_limit") == 2
+    assert d2_forcing.get("captures_extend_limit") == 1
+    assert d3_forcing.get("captures_extend_limit") == 1
 
     board = Board()
     profile = profiles_by_id["d3_pawnwise_forcing"]
@@ -1407,6 +1407,28 @@ def test_intermezzo_fen_returns_legal_move_for_ai_three_ply_and_above():
     )
 
 
+def test_hanging_d5_pawn_is_always_captured_by_queen_for_required_profiles():
+    if not c_search_available():
+        return
+
+    fen_tokens = [
+        "fen",
+        "rnbqkbnr/ppp1pppp/8/3P4/8/8/PPPP1PPP/RNBQKBNR",
+        "b",
+        "KQkq",
+        "-",
+        "0",
+        "2",
+    ]
+    profiles_by_id = _required_search_profiles_by_id()
+
+    for profile_id in TEST_SEARCH_PROFILE_IDS:
+        board, active_color = parse_uci_position(fen_tokens)
+        move = choose_ai_move(board, active_color, profiles_by_id[profile_id], rng=random.Random(0))
+        move_text = "0000" if move is None else f"{position_to_square(move[0])}{position_to_square(move[1])}"
+        assert move_text == "d8d5", f"{profile_id} expected d8d5, got {move_text}"
+
+
 def test_c_search_cache_handle_reused_across_turns():
     if not c_search_available():
         return
@@ -1737,6 +1759,7 @@ def run_all_tests():
         test_c_search_returns_legal_move_when_available,
         test_pawnwise_fen_returns_legal_move_for_shallow_depths,
         test_intermezzo_fen_returns_legal_move_for_ai_three_ply_and_above,
+        test_hanging_d5_pawn_is_always_captured_by_queen_for_required_profiles,
         test_c_search_cache_handle_reused_across_turns,
         test_parse_uci_position_startpos_with_moves_tracks_turn,
         test_uci_go_reports_score_info_line,

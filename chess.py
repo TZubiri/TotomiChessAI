@@ -189,7 +189,7 @@ SPECIAL_AI_PROFILES = [
             "corner_touch_rook": 0.95,
         },
         "captures_extend_plies": True,
-        "captures_extend_limit": 2,
+        "captures_extend_limit": 1,
     },
     {
         "id": "d2_pawnwise_control",
@@ -283,7 +283,7 @@ SPECIAL_AI_PROFILES = [
             "corner_touch_rook": 0.95,
         },
         "captures_extend_plies": True,
-        "captures_extend_limit": 2,
+        "captures_extend_limit": 1,
     },
     {
         "id": "d4_pawnwise",
