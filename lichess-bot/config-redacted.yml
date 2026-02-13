@@ -3,7 +3,7 @@ url: "https://lichess.org/"        # Lichess base URL.
 
 engine:                            # Engine settings.
   dir: "/home/opencode/chess/"                # Directory containing the engine. This can be an absolute path or one relative to lichess-bot/.
-  name: "chess_uci_d4_pawnwise.sh"              # Binary name of the engine to use.
+  name: "cud3pwf.sh"              # Binary name of the engine to use.
   debug: False                     # When enabled, log all startup communication with the engine.
 # interpreter: "python3"
 # interpreter_options:
