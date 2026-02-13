@@ -33,11 +33,11 @@ PAWNWISE_ROOK_BITMAP_ROWS = (
 
 PAWNWISE_KNIGHT_BITMAP_ROWS = (
     "tv-xx-vt",
-    "v------v",
-    "xDDEEDDx",
+    "v---C--v",
+    "xDKEED-x",
     "-CFLLFC-",
-    "--FLLF--",
-    "--DHHD--",
+    "-BFLLFB-",
+    "--BDDB--",
     "v------v",
     "tv----vt",
 )
