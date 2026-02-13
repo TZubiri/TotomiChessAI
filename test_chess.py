@@ -46,6 +46,8 @@ from chess import (
 )
 from chess_uci import move_to_uci, parse_uci_position
 from run_tournament import build_fixtures, rank_rows_with_tiebreakers, run_tournament
+from ai_positions import BITMAP_BASE53_LOOKUP
+from ai_positions._shared import PAWNWISE_PAWN_BITMAP_ROWS
 
 
 def _empty_board():
@@ -646,6 +648,79 @@ def test_position_weight_transition_uses_material_phase():
     assert mixed_material == 10.0
     assert abs(mixed_phase - expected_phase) < 1e-9
     assert abs(mixed_heuristic - expected_pawn_heuristic) < 1e-9
+
+
+def test_kings_bishop_pawn_bitmap_values_prefer_start_square_for_both_sides():
+    profiles = get_ai_profiles()
+    pawnwise_profiles = [
+        profile
+        for profile in profiles
+        if "pawnwise" in profile["id"] and profile.get("position_multipliers")
+    ]
+    assert pawnwise_profiles
+
+    def expected_multiplier(color, square):
+        col, row = square
+        mapped_col = 7 - col
+        mapped_row = row if color == "white" else 7 - row
+        bitmap_char = PAWNWISE_PAWN_BITMAP_ROWS[mapped_row][mapped_col]
+        return BITMAP_BASE53_LOOKUP[bitmap_char] / 26.0
+
+    white_squares = {
+        "start": (5, 1),
+        "one_step": (5, 2),
+        "two_step": (5, 3),
+    }
+    black_squares = {
+        "start": (5, 6),
+        "one_step": (5, 5),
+        "two_step": (5, 4),
+    }
+
+    for profile in pawnwise_profiles:
+        position_tables = profile["position_multipliers"]
+
+        for color, squares in (("white", white_squares), ("black", black_squares)):
+            actual_multipliers = {}
+
+            for label, square in squares.items():
+                col, row = square
+                mapped_col = 7 - col
+                mapped_row = row if color == "white" else 7 - row
+                square_index = (mapped_row * 8) + mapped_col
+
+                actual_multiplier = position_tables["opening"]["pawn"][square_index]
+                expected = expected_multiplier(color, square)
+                actual_multipliers[label] = actual_multiplier
+
+                assert abs(actual_multiplier - expected) < 1e-9, (
+                    f"{profile['id']} {color} {label}: expected {expected}, got {actual_multiplier}"
+                )
+
+                board = _empty_board()
+                _place(board, Pawn(color, square))
+                material_score, heuristic_score = evaluate_position_scores(
+                    board,
+                    color,
+                    profile["piece_values"],
+                    pawn_rank_values=profile.get("pawn_rank_values"),
+                    backward_pawn_value=profile.get("backward_pawn_value"),
+                    position_multipliers=position_tables,
+                    control_weight=0.0,
+                    opposite_bishop_draw_factor=None,
+                )
+                expected_heuristic = expected - profile["piece_values"]["pawn"]
+                assert abs(material_score - profile["piece_values"]["pawn"]) < 1e-9
+                assert abs(heuristic_score - expected_heuristic) < 1e-9, (
+                    f"{profile['id']} {color} {label}: expected heuristic {expected_heuristic}, got {heuristic_score}"
+                )
+
+            assert actual_multipliers["start"] > actual_multipliers["one_step"], (
+                f"{profile['id']} {color}: expected start > one-step, got {actual_multipliers}"
+            )
+            assert actual_multipliers["start"] > actual_multipliers["two_step"], (
+                f"{profile['id']} {color}: expected start > two-step, got {actual_multipliers}"
+            )
 
 
 def test_pawnwise_control_profile_drawish_opposite_bishops():
@@ -1484,6 +1559,7 @@ def run_all_tests():
         test_pawnwise_profile_heuristics_affect_evaluation,
         test_profile_position_bitmaps_load_per_piece_table,
         test_position_weight_transition_uses_material_phase,
+        test_kings_bishop_pawn_bitmap_values_prefer_start_square_for_both_sides,
         test_pawnwise_control_profile_drawish_opposite_bishops,
         test_position_heuristics_are_tie_breakers_for_major_pieces,
         test_minimax_prefers_material_over_heuristic,
