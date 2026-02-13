@@ -11,8 +11,8 @@ NEUTRAL_BITMAP_ROWS = (
 
 PAWNWISE_PAWN_BITMAP_ROWS = (
     "--------",
-    "--Cww---",
-    "--xCC---",
+    "-DCww-B-",
+    "A-xCC--A",
     "--xFFE--",
     "--EEEE--",
     "LLLLLLLL",
@@ -21,14 +21,14 @@ PAWNWISE_PAWN_BITMAP_ROWS = (
 )
 
 PAWNWISE_ROOK_BITMAP_ROWS = (
-    "xz----zx",
+    "xz-BB-zx",
     "z------z",
+    "--DHHD--",
+    "--EEEE--",
+    "--EEEE--",
     "--DEED--",
-    "--EHHE--",
-    "--EHHE--",
-    "--DEED--",
-    "z------z",
-    "xz----zx",
+    "JLLLLLLJ",
+    "DKKKKKKD",
 )
 
 PAWNWISE_KNIGHT_BITMAP_ROWS = (
@@ -76,14 +76,14 @@ PAWNWISE_QUEEN_BITMAP_ROWS = (
 )
 
 PAWNWISE_KING_BITMAP_ROWS = (
-    "kx----xk",
-    "A--CC--A",
-    "w-FCCF-w",
-    "--CDDC--",
-    "--CDDC--",
-    "--BCCB--",
+    "CGxA-CEB",
+    "wvvvvvvw",
+    "xwwwwwwx",
+    "A------A",
+    "A------A",
+    "BAAAAAAB",
+    "CBBBBBBC",
     "--------",
-    "k------k",
 )
 
 
