@@ -723,6 +723,52 @@ def test_kings_bishop_pawn_bitmap_values_prefer_start_square_for_both_sides():
             )
 
 
+def test_castling_rights_add_secondary_score_and_rook_movement_loses_it():
+    piece_values = {
+        "pawn": 1.0,
+        "knight": 3.0,
+        "bishop": 3.0,
+        "rook": 5.0,
+        "queen": 9.0,
+        "king": 0.0,
+    }
+
+    board = _empty_board()
+    _place(board, King("white", (4, 0)))
+    white_h_rook = _place(board, Rook("white", (7, 0)))
+    white_a_rook = _place(board, Rook("white", (0, 0)))
+    _place(board, King("black", (4, 7)))
+
+    material_score, heuristic_score = evaluate_position_scores(board, "white", piece_values)
+    assert abs(material_score - 10.0) < 1e-9
+    assert abs(heuristic_score - 5.0) < 1e-9
+
+    white_h_rook.moved = True
+    _, heuristic_without_kingside = evaluate_position_scores(board, "white", piece_values)
+    assert abs(heuristic_without_kingside - 2.0) < 1e-9
+
+    white_a_rook.moved = True
+    _, heuristic_without_castling = evaluate_position_scores(board, "white", piece_values)
+    assert abs(heuristic_without_castling - 0.0) < 1e-9
+
+    black_board = _empty_board()
+    _place(black_board, King("white", (4, 0)))
+    _place(black_board, King("black", (4, 7)))
+    black_h_rook = _place(black_board, Rook("black", (7, 7)))
+    black_a_rook = _place(black_board, Rook("black", (0, 7)))
+
+    _, black_heuristic = evaluate_position_scores(black_board, "black", piece_values)
+    assert abs(black_heuristic - 5.0) < 1e-9
+
+    black_h_rook.moved = True
+    _, black_no_kingside = evaluate_position_scores(black_board, "black", piece_values)
+    assert abs(black_no_kingside - 2.0) < 1e-9
+
+    black_a_rook.moved = True
+    _, black_none = evaluate_position_scores(black_board, "black", piece_values)
+    assert abs(black_none - 0.0) < 1e-9
+
+
 def test_pawnwise_control_profile_drawish_opposite_bishops():
     board = _empty_board()
     _place(board, Bishop("white", (2, 0)))
@@ -1560,6 +1606,7 @@ def run_all_tests():
         test_profile_position_bitmaps_load_per_piece_table,
         test_position_weight_transition_uses_material_phase,
         test_kings_bishop_pawn_bitmap_values_prefer_start_square_for_both_sides,
+        test_castling_rights_add_secondary_score_and_rook_movement_loses_it,
         test_pawnwise_control_profile_drawish_opposite_bishops,
         test_position_heuristics_are_tie_breakers_for_major_pieces,
         test_minimax_prefers_material_over_heuristic,

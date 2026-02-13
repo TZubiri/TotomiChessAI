@@ -7,6 +7,8 @@
 #define MAX_MOVES 256
 #define POSITION_TABLE_COUNT 7
 #define PHASE_TABLE_SIZE (POSITION_TABLE_COUNT * 64)
+#define CASTLING_KINGSIDE_SCORE 3.0
+#define CASTLING_QUEENSIDE_SCORE 2.0
 
 enum {
     POSITION_TABLE_PAWN = 0,
@@ -98,6 +100,58 @@ static int is_inside(int col, int row) {
 
 static int opponent_color(int color) {
     return color == 0 ? 1 : 0;
+}
+
+static int find_piece_index_at(const SearchState* state, int col, int row) {
+    if (!is_inside(col, row)) {
+        return -1;
+    }
+    int piece_index = state->board[row][col];
+    if (piece_index == -1 || !state->alive[piece_index]) {
+        return -1;
+    }
+    return piece_index;
+}
+
+static int has_castling_right_state(const SearchState* state, int color, int kingside) {
+    int home_row = color == 0 ? 0 : 7;
+    int king_index = find_piece_index_at(state, 4, home_row);
+    if (king_index == -1) {
+        return 0;
+    }
+    if (
+        state->piece_type[king_index] != PIECE_KING
+        || state->piece_color[king_index] != color
+        || state->piece_moved[king_index]
+    ) {
+        return 0;
+    }
+
+    int rook_col = kingside ? 7 : 0;
+    int rook_index = find_piece_index_at(state, rook_col, home_row);
+    if (rook_index == -1) {
+        return 0;
+    }
+    if (
+        state->piece_type[rook_index] != PIECE_ROOK
+        || state->piece_color[rook_index] != color
+        || state->piece_moved[rook_index]
+    ) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static double castling_rights_score_for_color_state(const SearchState* state, int color) {
+    double score = 0.0;
+    if (has_castling_right_state(state, color, 1)) {
+        score += CASTLING_KINGSIDE_SCORE;
+    }
+    if (has_castling_right_state(state, color, 0)) {
+        score += CASTLING_QUEENSIDE_SCORE;
+    }
+    return score;
 }
 
 static double clamp01(double value) {
@@ -824,6 +878,10 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
         }
     }
 
+    int opposing_color = opponent_color(perspective_color);
+    score.heuristic += castling_rights_score_for_color_state(state, perspective_color);
+    score.heuristic -= castling_rights_score_for_color_state(state, opposing_color);
+
     if (params->control_weight != 0.0) {
         score.heuristic += params->control_weight * control_score(state, perspective_color, params, opening_phase);
     }
@@ -1172,6 +1230,7 @@ int evaluate_piece_components_c(
     const int* piece_colors,
     const int* piece_cols,
     const int* piece_rows,
+    const int* piece_moved,
     int piece_count,
     int perspective_color,
     const double* piece_values,
@@ -1189,6 +1248,7 @@ int evaluate_piece_components_c(
         || piece_colors == NULL
         || piece_cols == NULL
         || piece_rows == NULL
+        || piece_moved == NULL
         || piece_values == NULL
         || out_material == NULL
         || out_heuristic == NULL
@@ -1203,7 +1263,7 @@ int evaluate_piece_components_c(
         piece_colors,
         piece_cols,
         piece_rows,
-        NULL,
+        piece_moved,
         piece_count,
         -1,
         -1,

@@ -20,6 +20,8 @@ PIECE_TYPE_BY_CLASS = {
 }
 PIECE_ORDER = ["pawn", "knight", "bishop", "rook", "queen", "king"]
 PIECE_INDEX_BY_TYPE = {piece_type: index for index, piece_type in enumerate(PIECE_ORDER)}
+CASTLING_KINGSIDE_SCORE = 3.0
+CASTLING_QUEENSIDE_SCORE = 2.0
 C_EVAL_SOURCE = os.path.join(os.path.dirname(__file__), "ai_eval.c")
 C_EVAL_LIBRARY = os.path.join(os.path.dirname(__file__), "ai_eval.so")
 C_SEARCH_CACHE_MAX_BYTES = 1024 * 1024 * 1024
@@ -839,6 +841,7 @@ def _load_c_eval_function():
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
         ctypes.c_int,
         ctypes.c_int,
         ctypes.POINTER(ctypes.c_double),
@@ -1165,7 +1168,14 @@ def _evaluate_position_scores_c_base(
     if not board.pieces:
         return 0.0, 0.0
 
-    piece_count, piece_type_array, piece_color_array, piece_col_array, piece_row_array, _ = _build_c_piece_arrays(board)
+    (
+        piece_count,
+        piece_type_array,
+        piece_color_array,
+        piece_col_array,
+        piece_row_array,
+        piece_moved_array,
+    ) = _build_c_piece_arrays(board, include_moved=True)
     (
         piece_value_array,
         pawn_rank_array,
@@ -1189,6 +1199,7 @@ def _evaluate_position_scores_c_base(
         piece_color_array,
         piece_col_array,
         piece_row_array,
+        piece_moved_array,
         piece_count,
         perspective_color_index,
         piece_value_array,
@@ -2069,6 +2080,25 @@ def _has_opposite_color_bishops(board):
     return white_square_color != black_square_color
 
 
+def _castling_rights_secondary_score(board, perspective_color):
+    rights = board.get_castling_rights()
+    white_score = 0.0
+    black_score = 0.0
+
+    if "K" in rights:
+        white_score += CASTLING_KINGSIDE_SCORE
+    if "Q" in rights:
+        white_score += CASTLING_QUEENSIDE_SCORE
+    if "k" in rights:
+        black_score += CASTLING_KINGSIDE_SCORE
+    if "q" in rights:
+        black_score += CASTLING_QUEENSIDE_SCORE
+
+    if perspective_color == "white":
+        return white_score - black_score
+    return black_score - white_score
+
+
 def _evaluate_piece_scores(
     piece,
     board,
@@ -2122,6 +2152,8 @@ def _evaluate_position_scores_python_base(
         else:
             material_score -= piece_material
             heuristic_score -= piece_heuristic
+
+    heuristic_score += _castling_rights_secondary_score(board, perspective_color)
 
     return material_score, heuristic_score
 
