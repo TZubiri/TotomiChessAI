@@ -9,6 +9,11 @@
 #define PHASE_TABLE_SIZE (POSITION_TABLE_COUNT * 64)
 #define CASTLING_KINGSIDE_SCORE 3.0
 #define CASTLING_QUEENSIDE_SCORE 2.0
+#define MOST_ADVANCED_PAWN_MAX_PER_RANK 2.0
+#define MOST_ADVANCED_PAWN_FULL_HALF_MOVES 200.0
+#define KING_SAFETY_ADJACENT_PIECE_SCORE 2.0
+#define KING_SAFETY_FRONT_PAWN_SCORE 2.0
+#define KING_SAFETY_DOUBLE_FRONT_PAWN_SCORE 1.0
 
 enum {
     POSITION_TABLE_PAWN = 0,
@@ -43,6 +48,7 @@ typedef struct {
     int en_passant_capture_col;
     int en_passant_capture_row;
     int halfmove_clock;
+    int total_halfmoves_played;
 } SearchState;
 
 typedef struct {
@@ -102,6 +108,9 @@ static int opponent_color(int color) {
     return color == 0 ? 1 : 0;
 }
 
+static double clamp01(double value);
+static void generate_moves_for_piece(const SearchState* state, int piece_index, MoveList* list);
+
 static int find_piece_index_at(const SearchState* state, int col, int row) {
     if (!is_inside(col, row)) {
         return -1;
@@ -152,6 +161,155 @@ static double castling_rights_score_for_color_state(const SearchState* state, in
         score += CASTLING_QUEENSIDE_SCORE;
     }
     return score;
+}
+
+static int most_advanced_pawn_progress_for_color_state(const SearchState* state, int color) {
+    int max_progress = 0;
+    for (int i = 0; i < state->piece_count; i++) {
+        if (!state->alive[i] || state->piece_type[i] != PIECE_PAWN || state->piece_color[i] != color) {
+            continue;
+        }
+        int row = state->piece_row[i];
+        int progress = color == 0 ? row - 1 : 6 - row;
+        if (progress < 0) {
+            progress = 0;
+        }
+        if (progress > max_progress) {
+            max_progress = progress;
+        }
+    }
+    return max_progress;
+}
+
+static double most_advanced_pawn_multiplier_state(const SearchState* state) {
+    double halfmoves_played = (double)state->total_halfmoves_played;
+    if (halfmoves_played < 0.0) {
+        halfmoves_played = 0.0;
+    }
+    double ratio = halfmoves_played / MOST_ADVANCED_PAWN_FULL_HALF_MOVES;
+    ratio = clamp01(ratio);
+    return MOST_ADVANCED_PAWN_MAX_PER_RANK * ratio;
+}
+
+static double most_advanced_pawn_secondary_score_state(const SearchState* state, int perspective_color) {
+    int white_progress = most_advanced_pawn_progress_for_color_state(state, 0);
+    int black_progress = most_advanced_pawn_progress_for_color_state(state, 1);
+    double per_rank_multiplier = most_advanced_pawn_multiplier_state(state);
+    if (perspective_color == 0) {
+        return (double)(white_progress - black_progress) * per_rank_multiplier;
+    }
+    return (double)(black_progress - white_progress) * per_rank_multiplier;
+}
+
+static int find_king_index_for_color_state(const SearchState* state, int color) {
+    for (int i = 0; i < state->piece_count; i++) {
+        if (!state->alive[i]) {
+            continue;
+        }
+        if (state->piece_type[i] == PIECE_KING && state->piece_color[i] == color) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int is_friendly_piece_at_state(const SearchState* state, int color, int col, int row) {
+    int piece_index = find_piece_index_at(state, col, row);
+    if (piece_index == -1) {
+        return 0;
+    }
+    return state->piece_color[piece_index] == color;
+}
+
+static int is_friendly_pawn_at_state(const SearchState* state, int color, int col, int row) {
+    int piece_index = find_piece_index_at(state, col, row);
+    if (piece_index == -1) {
+        return 0;
+    }
+    return state->piece_color[piece_index] == color && state->piece_type[piece_index] == PIECE_PAWN;
+}
+
+static double king_mobility_secondary_score_for_count(int move_count) {
+    static const double mobility_scores[9] = {-1.0, 2.0, 3.0, 4.0, 4.0, 3.0, 3.0, 2.0, 2.0};
+    if (move_count < 0) {
+        move_count = 0;
+    }
+    if (move_count > 8) {
+        move_count = 8;
+    }
+    return mobility_scores[move_count];
+}
+
+static double king_safety_score_for_color_state(const SearchState* state, int color) {
+    int king_index = find_king_index_for_color_state(state, color);
+    if (king_index == -1) {
+        return 0.0;
+    }
+
+    int king_col = state->piece_col[king_index];
+    int king_row = state->piece_row[king_index];
+    double score = 0.0;
+
+    for (int d_col = -1; d_col <= 1; d_col++) {
+        for (int d_row = -1; d_row <= 1; d_row++) {
+            if (d_col == 0 && d_row == 0) {
+                continue;
+            }
+            int col = king_col + d_col;
+            int row = king_row + d_row;
+            if (!is_inside(col, row)) {
+                continue;
+            }
+            if (is_friendly_piece_at_state(state, color, col, row)) {
+                score += KING_SAFETY_ADJACENT_PIECE_SCORE;
+            }
+        }
+    }
+
+    int direction = color == 0 ? 1 : -1;
+    int front_rows[2] = {king_row + direction, king_row + (2 * direction)};
+    double front_bonuses[2] = {KING_SAFETY_FRONT_PAWN_SCORE, KING_SAFETY_DOUBLE_FRONT_PAWN_SCORE};
+    for (int distance_index = 0; distance_index < 2; distance_index++) {
+        int target_row = front_rows[distance_index];
+        for (int d_col = -1; d_col <= 1; d_col++) {
+            int target_col = king_col + d_col;
+            if (!is_inside(target_col, target_row)) {
+                continue;
+            }
+            if (is_friendly_pawn_at_state(state, color, target_col, target_row)) {
+                score += front_bonuses[distance_index];
+            }
+        }
+    }
+
+    MoveList king_moves;
+    king_moves.count = 0;
+    generate_moves_for_piece(state, king_index, &king_moves);
+    int king_step_moves = 0;
+    for (int i = 0; i < king_moves.count; i++) {
+        int from_col = king_moves.entries[i].from_col;
+        int from_row = king_moves.entries[i].from_row;
+        int to_col = king_moves.entries[i].to_col;
+        int to_row = king_moves.entries[i].to_row;
+        int d_col = to_col > from_col ? to_col - from_col : from_col - to_col;
+        int d_row = to_row > from_row ? to_row - from_row : from_row - to_row;
+        int max_delta = d_col > d_row ? d_col : d_row;
+        if (max_delta == 1) {
+            king_step_moves += 1;
+        }
+    }
+    score += king_mobility_secondary_score_for_count(king_step_moves);
+
+    return score;
+}
+
+static double king_safety_secondary_score_state(const SearchState* state, int perspective_color) {
+    double white_score = king_safety_score_for_color_state(state, 0);
+    double black_score = king_safety_score_for_color_state(state, 1);
+    if (perspective_color == 0) {
+        return white_score - black_score;
+    }
+    return black_score - white_score;
 }
 
 static double clamp01(double value) {
@@ -209,7 +367,7 @@ static double square_weight_for_piece(
     double opening_phase
 ) {
     if (!has_position_multipliers || position_multipliers == NULL) {
-        return 1.0;
+        return 0.0;
     }
 
     if (
@@ -306,7 +464,8 @@ static int init_state(
     int en_passant_target_row,
     int en_passant_capture_col,
     int en_passant_capture_row,
-    int halfmove_clock
+    int halfmove_clock,
+    int total_halfmoves_played
 ) {
     if (piece_count < 0 || piece_count > MAX_PIECES) {
         return 0;
@@ -348,6 +507,7 @@ static int init_state(
     state->en_passant_capture_col = en_passant_capture_col;
     state->en_passant_capture_row = en_passant_capture_row;
     state->halfmove_clock = halfmove_clock;
+    state->total_halfmoves_played = total_halfmoves_played;
     return 1;
 }
 
@@ -697,6 +857,7 @@ static int apply_move(SearchState* state, const Move* move) {
     } else {
         state->halfmove_clock += 1;
     }
+    state->total_halfmoves_played += 1;
 
     return 1;
 }
@@ -843,22 +1004,7 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
         int piece_row = state->piece_row[i];
 
         double material_score = params->piece_values[piece_type];
-        double piece_score = material_score;
-
-        if (piece_type == PIECE_PAWN) {
-            if (params->has_pawn_rank_values && params->pawn_rank_values != NULL) {
-                int pawn_rank = piece_color == 0 ? piece_row + 1 : 8 - piece_row;
-                double rank_score = params->pawn_rank_values[pawn_rank];
-                if (rank_score > piece_score) {
-                    piece_score = rank_score;
-                }
-            }
-            if (params->has_backward_pawn_value && is_backward_pawn_state(state, i) && params->backward_pawn_value < piece_score) {
-                piece_score = params->backward_pawn_value;
-            }
-        }
-
-        piece_score *= square_weight_for_piece(
+        double heuristic_score = square_weight_for_piece(
             piece_type,
             piece_color,
             piece_col,
@@ -867,7 +1013,21 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
             params->has_position_multipliers,
             opening_phase
         );
-        double heuristic_score = piece_score - material_score;
+
+        if (piece_type == PIECE_PAWN) {
+            double pawn_score = material_score;
+            if (params->has_pawn_rank_values && params->pawn_rank_values != NULL) {
+                int pawn_rank = piece_color == 0 ? piece_row + 1 : 8 - piece_row;
+                double rank_score = params->pawn_rank_values[pawn_rank];
+                if (rank_score > pawn_score) {
+                    pawn_score = rank_score;
+                }
+            }
+            if (params->has_backward_pawn_value && is_backward_pawn_state(state, i) && params->backward_pawn_value < pawn_score) {
+                pawn_score = params->backward_pawn_value;
+            }
+            heuristic_score += pawn_score - material_score;
+        }
 
         if (piece_color == perspective_color) {
             score.material += material_score;
@@ -881,6 +1041,8 @@ static Score evaluate_state(const SearchState* state, int perspective_color, con
     int opposing_color = opponent_color(perspective_color);
     score.heuristic += castling_rights_score_for_color_state(state, perspective_color);
     score.heuristic -= castling_rights_score_for_color_state(state, opposing_color);
+    score.heuristic += most_advanced_pawn_secondary_score_state(state, perspective_color);
+    score.heuristic += king_safety_secondary_score_state(state, perspective_color);
 
     if (params->control_weight != 0.0) {
         score.heuristic += params->control_weight * control_score(state, perspective_color, params, opening_phase);
@@ -922,6 +1084,7 @@ static uint64_t hash_state(const SearchState* state, int active_color, int remai
         | ((uint64_t)(state->en_passant_capture_row + 1) << 12);
     hash = hash_mix(hash, en_passant_bits);
     hash = hash_mix(hash, (uint64_t)state->halfmove_clock);
+    hash = hash_mix(hash, (uint64_t)state->total_halfmoves_played);
     hash = hash_mix(hash, (uint64_t)active_color);
     hash = hash_mix(hash, (uint64_t)remaining_plies);
     return hash;
@@ -1240,6 +1403,7 @@ int evaluate_piece_components_c(
     int has_backward_pawn_value,
     const double* position_multipliers,
     int has_position_multipliers,
+    int total_halfmoves_played,
     double* out_material,
     double* out_heuristic
 ) {
@@ -1269,7 +1433,8 @@ int evaluate_piece_components_c(
         -1,
         -1,
         -1,
-        0
+        0,
+        total_halfmoves_played
     )) {
         return 0;
     }
@@ -1320,6 +1485,7 @@ int choose_best_move_c(
     int en_passant_capture_col,
     int en_passant_capture_row,
     int halfmove_clock,
+    int total_halfmoves_played,
     int* out_from_col,
     int* out_from_row,
     int* out_to_col,
@@ -1360,7 +1526,8 @@ int choose_best_move_c(
         en_passant_target_row,
         en_passant_capture_col,
         en_passant_capture_row,
-        halfmove_clock
+        halfmove_clock,
+        total_halfmoves_played
     )) {
         return 0;
     }

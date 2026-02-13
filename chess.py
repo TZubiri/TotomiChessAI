@@ -22,6 +22,22 @@ PIECE_ORDER = ["pawn", "knight", "bishop", "rook", "queen", "king"]
 PIECE_INDEX_BY_TYPE = {piece_type: index for index, piece_type in enumerate(PIECE_ORDER)}
 CASTLING_KINGSIDE_SCORE = 3.0
 CASTLING_QUEENSIDE_SCORE = 2.0
+MOST_ADVANCED_PAWN_MAX_PER_RANK = 2.0
+MOST_ADVANCED_PAWN_FULL_HALF_MOVES = 200.0
+KING_SAFETY_ADJACENT_PIECE_SCORE = 2.0
+KING_SAFETY_FRONT_PAWN_SCORE = 2.0
+KING_SAFETY_DOUBLE_FRONT_PAWN_SCORE = 1.0
+KING_MOBILITY_SCORES = {
+    0: -1.0,
+    1: 2.0,
+    2: 3.0,
+    3: 4.0,
+    4: 4.0,
+    5: 3.0,
+    6: 3.0,
+    7: 2.0,
+    8: 2.0,
+}
 C_EVAL_SOURCE = os.path.join(os.path.dirname(__file__), "ai_eval.c")
 C_EVAL_LIBRARY = os.path.join(os.path.dirname(__file__), "ai_eval.so")
 C_SEARCH_CACHE_MAX_BYTES = 1024 * 1024 * 1024
@@ -851,6 +867,7 @@ def _load_c_eval_function():
         ctypes.c_int,
         ctypes.POINTER(ctypes.c_double),
         ctypes.c_int,
+        ctypes.c_int,
         ctypes.POINTER(ctypes.c_double),
         ctypes.POINTER(ctypes.c_double),
     ]
@@ -999,6 +1016,7 @@ def _load_c_search_function():
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.c_int,
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
         ctypes.POINTER(ctypes.c_int),
@@ -1138,6 +1156,7 @@ def _choose_minimax_legal_move_c(
         en_passant_capture_col,
         en_passant_capture_row,
         int(board.halfmove_clock),
+        int(getattr(board, "total_halfmoves_played", 0)),
         ctypes.byref(out_from_col),
         ctypes.byref(out_from_row),
         ctypes.byref(out_to_col),
@@ -1209,6 +1228,7 @@ def _evaluate_position_scores_c_base(
         has_backward_pawn_value,
         position_array,
         has_position_multipliers,
+        int(getattr(board, "total_halfmoves_played", 0)),
         ctypes.byref(material_score),
         ctypes.byref(heuristic_score),
     )
@@ -1504,6 +1524,7 @@ class Board:
         self.en_passant_target = None
         self.en_passant_capture_position = None
         self.halfmove_clock = 0
+        self.total_halfmoves_played = 0
         self.position_counts = {}
         self.setup_starting_position()
     
@@ -1514,6 +1535,7 @@ class Board:
         self.en_passant_target = None
         self.en_passant_capture_position = None
         self.halfmove_clock = 0
+        self.total_halfmoves_played = 0
         self.position_counts = {}
         
         # White pieces
@@ -1870,6 +1892,7 @@ class Board:
             self.en_passant_capture_position = (to_col, to_row)
 
         if update_tracking:
+            self.total_halfmoves_played += 1
             if is_pawn_move or is_capture:
                 self.halfmove_clock = 0
             else:
@@ -2033,7 +2056,7 @@ def _is_backward_pawn(board, pawn):
 
 def _square_weight_for_piece(piece, square, position_multipliers, opening_phase):
     if not position_multipliers:
-        return 1.0
+        return 0.0
 
     piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
     if piece_type == "bishop":
@@ -2099,6 +2122,84 @@ def _castling_rights_secondary_score(board, perspective_color):
     return black_score - white_score
 
 
+def _most_advanced_pawn_progress(board, color):
+    max_progress = 0
+    for piece in board.pieces:
+        if not isinstance(piece, Pawn) or piece.color != color:
+            continue
+        _, row = piece.position
+        if color == "white":
+            progress = max(0, row - 1)
+        else:
+            progress = max(0, 6 - row)
+        if progress > max_progress:
+            max_progress = progress
+    return max_progress
+
+
+def _most_advanced_pawn_multiplier(board):
+    halfmoves_played = float(max(0, getattr(board, "total_halfmoves_played", 0)))
+    ratio = min(1.0, halfmoves_played / MOST_ADVANCED_PAWN_FULL_HALF_MOVES)
+    return MOST_ADVANCED_PAWN_MAX_PER_RANK * ratio
+
+
+def _most_advanced_pawn_secondary_score(board, perspective_color):
+    per_rank_multiplier = _most_advanced_pawn_multiplier(board)
+    white_progress = _most_advanced_pawn_progress(board, "white")
+    black_progress = _most_advanced_pawn_progress(board, "black")
+    if perspective_color == "white":
+        return (white_progress - black_progress) * per_rank_multiplier
+    return (black_progress - white_progress) * per_rank_multiplier
+
+
+def _king_safety_score_for_color(board, color):
+    king = next((piece for piece in board.pieces if isinstance(piece, King) and piece.color == color), None)
+    if king is None:
+        return 0.0
+
+    king_col, king_row = king.position
+    score = 0.0
+
+    for col_offset in (-1, 0, 1):
+        for row_offset in (-1, 0, 1):
+            if col_offset == 0 and row_offset == 0:
+                continue
+            adjacent_position = (king_col + col_offset, king_row + row_offset)
+            if not board.is_valid_position(adjacent_position):
+                continue
+            adjacent_piece = board.get_piece_at(adjacent_position)
+            if adjacent_piece is not None and adjacent_piece.color == color:
+                score += KING_SAFETY_ADJACENT_PIECE_SCORE
+
+    direction = 1 if color == "white" else -1
+    for step, pawn_bonus in ((1, KING_SAFETY_FRONT_PAWN_SCORE), (2, KING_SAFETY_DOUBLE_FRONT_PAWN_SCORE)):
+        target_row = king_row + (direction * step)
+        for col_offset in (-1, 0, 1):
+            target_position = (king_col + col_offset, target_row)
+            if not board.is_valid_position(target_position):
+                continue
+            target_piece = board.get_piece_at(target_position)
+            if isinstance(target_piece, Pawn) and target_piece.color == color:
+                score += pawn_bonus
+
+    legal_king_steps = 0
+    for move in king.get_legal_moves(board):
+        if max(abs(move[0] - king_col), abs(move[1] - king_row)) == 1:
+            legal_king_steps += 1
+    legal_king_steps = min(8, legal_king_steps)
+    score += KING_MOBILITY_SCORES[legal_king_steps]
+
+    return score
+
+
+def _king_safety_secondary_score(board, perspective_color):
+    white_score = _king_safety_score_for_color(board, "white")
+    black_score = _king_safety_score_for_color(board, "black")
+    if perspective_color == "white":
+        return white_score - black_score
+    return black_score - white_score
+
+
 def _evaluate_piece_scores(
     piece,
     board,
@@ -2110,17 +2211,17 @@ def _evaluate_piece_scores(
 ):
     piece_type = PIECE_TYPE_BY_CLASS[piece.__class__.__name__]
     material_score = piece_values[piece_type]
-    piece_score = material_score
+    heuristic_score = _position_multiplier(piece, position_multipliers, opening_phase)
 
     if isinstance(piece, Pawn):
+        pawn_score = material_score
         if pawn_rank_values:
             pawn_rank = _pawn_rank_for_value(piece)
-            piece_score = max(piece_score, pawn_rank_values.get(pawn_rank, piece_score))
+            pawn_score = max(pawn_score, pawn_rank_values.get(pawn_rank, pawn_score))
         if backward_pawn_value is not None and _is_backward_pawn(board, piece):
-            piece_score = min(piece_score, backward_pawn_value)
+            pawn_score = min(pawn_score, backward_pawn_value)
+        heuristic_score += pawn_score - material_score
 
-    piece_score *= _position_multiplier(piece, position_multipliers, opening_phase)
-    heuristic_score = piece_score - material_score
     return material_score, heuristic_score
 
 
@@ -2154,6 +2255,8 @@ def _evaluate_position_scores_python_base(
             heuristic_score -= piece_heuristic
 
     heuristic_score += _castling_rights_secondary_score(board, perspective_color)
+    heuristic_score += _most_advanced_pawn_secondary_score(board, perspective_color)
+    heuristic_score += _king_safety_secondary_score(board, perspective_color)
 
     return material_score, heuristic_score
 

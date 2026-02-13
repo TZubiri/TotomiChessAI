@@ -35,6 +35,7 @@ def _reset_board(board):
     board.en_passant_target = None
     board.en_passant_capture_position = None
     board.halfmove_clock = 0
+    board.total_halfmoves_played = 0
     board.position_counts = {}
 
 
@@ -90,6 +91,7 @@ def board_from_fen(fen_text):
     castling = fields[2]
     en_passant = fields[3]
     halfmove_clock = int(fields[4]) if len(fields) > 4 else 0
+    fullmove_number = int(fields[5]) if len(fields) > 5 else 1
 
     if active_color not in ("w", "b"):
         raise ValueError(f"Invalid FEN active color: {active_color}")
@@ -142,7 +144,9 @@ def board_from_fen(fen_text):
             board.en_passant_capture_position = capture_position
 
     board.halfmove_clock = max(0, halfmove_clock)
+    prior_fullmoves = max(0, fullmove_number - 1)
     side_to_move = "white" if active_color == "w" else "black"
+    board.total_halfmoves_played = (prior_fullmoves * 2) + (1 if side_to_move == "black" else 0)
     board.record_position(side_to_move)
     return board, side_to_move
 
