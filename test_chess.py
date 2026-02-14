@@ -132,6 +132,95 @@ def _assert_position_move_counts(case_name, board, expected_move_counts):
         )
 
 
+def _standard_piece_values():
+    return {
+        "pawn": 1.0,
+        "knight": 3.0,
+        "bishop": 3.0,
+        "rook": 5.0,
+        "queen": 9.0,
+        "king": 0.0,
+    }
+
+
+def _position_multipliers_with_white_queen_bonus(square, bonus):
+    neutral_weights = tuple([1.0] * 64)
+    queen_weights = [1.0] * 64
+    col, row = square
+    square_index = (row * 8) + (7 - col)
+    queen_weights[square_index] = float(bonus)
+    queen_table = tuple(queen_weights)
+
+    return {
+        "opening": {
+            "pawn": neutral_weights,
+            "knight": neutral_weights,
+            "bishop_white": neutral_weights,
+            "bishop_black": neutral_weights,
+            "rook": neutral_weights,
+            "queen": queen_table,
+            "king": neutral_weights,
+        },
+        "endgame": {
+            "pawn": neutral_weights,
+            "knight": neutral_weights,
+            "bishop_white": neutral_weights,
+            "bishop_black": neutral_weights,
+            "rook": neutral_weights,
+            "queen": queen_table,
+            "king": neutral_weights,
+        },
+    }
+
+
+def _build_threefold_avoidance_case(repetition_count_for_draw_move):
+    board = _empty_board()
+    _place(board, King("white", (6, 0)))
+    _place(board, Queen("white", (4, 1)))
+    _place(board, Pawn("white", (0, 1)))
+    _place(board, King("black", (6, 7)))
+
+    draw_move = ((4, 1), (4, 3))
+    simulation = board.clone()
+    simulation.move_piece(draw_move[0], draw_move[1])
+    draw_signature = simulation.get_position_signature("black")
+    board.position_counts[draw_signature] = repetition_count_for_draw_move
+
+    return board, draw_move
+
+
+def _build_fifty_move_avoidance_case(halfmove_clock):
+    board = _empty_board()
+    _place(board, King("white", (6, 0)))
+    _place(board, Queen("white", (4, 1)))
+    _place(board, Pawn("white", (0, 1)))
+    _place(board, King("black", (6, 7)))
+    board.halfmove_clock = halfmove_clock
+    return board
+
+
+def _build_stalemate_capture_case(include_black_escape_pawn):
+    board = _empty_board()
+
+    _place(board, King("white", (7, 0)))
+    _place(board, Rook("white", (7, 7)))
+    _place(board, Queen("white", (7, 1)))
+    _place(board, Queen("white", (7, 2)))
+    _place(board, Queen("white", (7, 3)))
+
+    _place(board, King("black", (0, 7)))
+    for row in range(0, 7):
+        _place(board, Pawn("black", (0, row)))
+    for row in range(0, 8):
+        _place(board, Pawn("black", (1, row)))
+    _place(board, Queen("black", (2, 7)))
+
+    if include_black_escape_pawn:
+        _place(board, Pawn("black", (3, 6)))
+
+    return board, ((7, 7), (2, 7))
+
+
 def _starting_position_expected_move_counts():
     expected = {}
 
@@ -436,6 +525,137 @@ def test_fifty_move_rule_draw_status():
 
     status = get_game_status(board, "white")
     assert status == {"state": "draw", "reason": "fifty_move_rule", "winner": None}
+
+
+def test_ai_avoids_threefold_repetition_draw_when_materially_ahead():
+    board, draw_move = _build_threefold_avoidance_case(repetition_count_for_draw_move=2)
+    piece_values = _standard_piece_values()
+    position_multipliers = _position_multipliers_with_white_queen_bonus((4, 3), 8.0)
+
+    draw_board = board.clone()
+    draw_board.move_piece(draw_move[0], draw_move[1])
+    assert get_game_status(draw_board, "black") == {
+        "state": "draw",
+        "reason": "threefold_repetition",
+        "winner": None,
+    }
+
+    move = choose_minimax_legal_move(
+        board,
+        "white",
+        1,
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    assert move is not None
+    assert move != draw_move
+    chosen_board = board.clone()
+    chosen_board.move_piece(move[0], move[1])
+    assert get_game_status(chosen_board, "black")["state"] == "in_progress"
+
+
+def test_ai_prefers_threefold_line_when_position_is_not_repeated_three_times():
+    board, expected_move = _build_threefold_avoidance_case(repetition_count_for_draw_move=1)
+    piece_values = _standard_piece_values()
+    position_multipliers = _position_multipliers_with_white_queen_bonus((4, 3), 8.0)
+
+    move = choose_minimax_legal_move(
+        board,
+        "white",
+        1,
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    assert move is not None
+    assert move == expected_move
+    chosen_board = board.clone()
+    chosen_board.move_piece(move[0], move[1])
+    assert get_game_status(chosen_board, "black")["state"] == "in_progress"
+
+
+def test_ai_avoids_fifty_move_rule_draw_when_materially_ahead():
+    board = _build_fifty_move_avoidance_case(halfmove_clock=99)
+    piece_values = _standard_piece_values()
+    position_multipliers = _position_multipliers_with_white_queen_bonus((4, 3), 8.0)
+    draw_move = ((4, 1), (4, 3))
+
+    draw_board = board.clone()
+    draw_board.move_piece(draw_move[0], draw_move[1])
+    assert get_game_status(draw_board, "black") == {
+        "state": "draw",
+        "reason": "fifty_move_rule",
+        "winner": None,
+    }
+
+    move = choose_minimax_legal_move(
+        board,
+        "white",
+        1,
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    assert move is not None
+    assert move[0] == (0, 1)
+    chosen_board = board.clone()
+    chosen_board.move_piece(move[0], move[1])
+    assert get_game_status(chosen_board, "black")["state"] == "in_progress"
+
+
+def test_ai_prefers_best_quiet_move_before_fifty_move_draw_threshold():
+    board = _build_fifty_move_avoidance_case(halfmove_clock=98)
+    piece_values = _standard_piece_values()
+    position_multipliers = _position_multipliers_with_white_queen_bonus((4, 3), 8.0)
+    expected_move = ((4, 1), (4, 3))
+
+    move = choose_minimax_legal_move(
+        board,
+        "white",
+        1,
+        piece_values,
+        position_multipliers=position_multipliers,
+    )
+
+    assert move is not None
+    assert move == expected_move
+    chosen_board = board.clone()
+    chosen_board.move_piece(move[0], move[1])
+    assert get_game_status(chosen_board, "black")["state"] == "in_progress"
+
+
+def test_ai_avoids_stalemate_capture_when_materially_ahead():
+    board, stalemate_capture = _build_stalemate_capture_case(include_black_escape_pawn=False)
+    piece_values = _standard_piece_values()
+
+    draw_board = board.clone()
+    draw_board.move_piece(stalemate_capture[0], stalemate_capture[1])
+    assert get_game_status(draw_board, "black") == {
+        "state": "draw",
+        "reason": "stalemate",
+        "winner": None,
+    }
+
+    move = choose_minimax_legal_move(board, "white", 1, piece_values)
+
+    assert move is not None
+    assert move != stalemate_capture
+    chosen_board = board.clone()
+    chosen_board.move_piece(move[0], move[1])
+    assert get_game_status(chosen_board, "black")["state"] == "in_progress"
+
+
+def test_ai_captures_free_queen_when_capture_is_not_stalemate():
+    board, expected_capture = _build_stalemate_capture_case(include_black_escape_pawn=True)
+    piece_values = _standard_piece_values()
+
+    capture_board = board.clone()
+    capture_board.move_piece(expected_capture[0], expected_capture[1])
+    assert get_game_status(capture_board, "black")["state"] == "in_progress"
+
+    move = choose_minimax_legal_move(board, "white", 1, piece_values)
+    assert move == expected_capture
 
 
 def test_king_capture_ends_game():
@@ -1720,6 +1940,12 @@ def run_all_tests():
         test_castling_allowed_even_when_path_square_is_attacked,
         test_threefold_repetition_draw_status,
         test_fifty_move_rule_draw_status,
+        test_ai_avoids_threefold_repetition_draw_when_materially_ahead,
+        test_ai_prefers_threefold_line_when_position_is_not_repeated_three_times,
+        test_ai_avoids_fifty_move_rule_draw_when_materially_ahead,
+        test_ai_prefers_best_quiet_move_before_fifty_move_draw_threshold,
+        test_ai_avoids_stalemate_capture_when_materially_ahead,
+        test_ai_captures_free_queen_when_capture_is_not_stalemate,
         test_king_capture_ends_game,
         test_choose_random_legal_move_returns_legal_move,
         test_apply_random_ai_move_executes_selected_legal_move,

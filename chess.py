@@ -2453,6 +2453,159 @@ def minimax_score(
     return best_score
 
 
+def _score_minimax_move(
+    board,
+    color,
+    move,
+    plies,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+    captures_extend_plies=False,
+    captures_extend_limit=None,
+):
+    simulation = board.clone()
+    simulation.move_piece(move[0], move[1])
+    next_color = board.get_opponent_color(color)
+    return minimax_score(
+        simulation,
+        next_color,
+        color,
+        plies - 1,
+        piece_values,
+        pawn_rank_values=pawn_rank_values,
+        backward_pawn_value=backward_pawn_value,
+        position_multipliers=position_multipliers,
+        control_weight=control_weight,
+        opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+        captures_extend_plies=captures_extend_plies,
+        captures_extend_limit=captures_extend_limit,
+    )
+
+
+def _choose_minimax_legal_move_python(
+    board,
+    color,
+    plies,
+    piece_values,
+    rng=None,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+    captures_extend_plies=False,
+    captures_extend_limit=None,
+):
+    legal_moves = board.get_legal_moves_for_color(color)
+    if not legal_moves:
+        return None
+
+    best_score = (float("-inf"), float("-inf"))
+    best_moves = []
+    for move in legal_moves:
+        score = _score_minimax_move(
+            board,
+            color,
+            move,
+            plies,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+            captures_extend_plies=captures_extend_plies,
+            captures_extend_limit=captures_extend_limit,
+        )
+        if score > best_score:
+            best_score = score
+            best_moves = [move]
+        elif score == best_score:
+            best_moves.append(move)
+
+    if not best_moves:
+        return None
+    if len(best_moves) == 1 or rng is None:
+        return best_moves[0]
+    random_source = rng if rng is not None else random
+    return random_source.choice(best_moves)
+
+
+def _move_results_in_draw(board, color, move):
+    simulation = board.clone()
+    simulation.move_piece(move[0], move[1])
+    next_color = board.get_opponent_color(color)
+    return get_game_status(simulation, next_color).get("state") == "draw"
+
+
+def _prefer_non_draw_move_when_ahead(
+    board,
+    color,
+    selected_move,
+    plies,
+    piece_values,
+    pawn_rank_values=None,
+    backward_pawn_value=None,
+    position_multipliers=None,
+    control_weight=0.0,
+    opposite_bishop_draw_factor=None,
+    captures_extend_plies=False,
+    captures_extend_limit=None,
+):
+    if selected_move is None:
+        return None
+
+    material_score, _ = evaluate_position_scores(
+        board,
+        color,
+        piece_values,
+        pawn_rank_values=pawn_rank_values,
+        backward_pawn_value=backward_pawn_value,
+        position_multipliers=position_multipliers,
+        control_weight=control_weight,
+        opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+    )
+    if material_score <= 0.0:
+        return selected_move
+
+    if not _move_results_in_draw(board, color, selected_move):
+        return selected_move
+
+    legal_moves = board.get_legal_moves_for_color(color)
+    best_non_draw_move = None
+    best_non_draw_score = (float("-inf"), float("-inf"))
+
+    for move in legal_moves:
+        if _move_results_in_draw(board, color, move):
+            continue
+
+        score = _score_minimax_move(
+            board,
+            color,
+            move,
+            plies,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+            captures_extend_plies=captures_extend_plies,
+            captures_extend_limit=captures_extend_limit,
+        )
+        if score > best_non_draw_score:
+            best_non_draw_score = score
+            best_non_draw_move = move
+
+    if best_non_draw_move is None:
+        return selected_move
+    return best_non_draw_move
+
+
 def choose_random_legal_move(board, color, rng=None):
     legal_moves = board.get_legal_moves_for_color(color)
     if not legal_moves:
@@ -2484,9 +2637,45 @@ def choose_minimax_legal_move(
     if plies <= 0:
         return choose_random_legal_move(board, color, rng=rng)
 
-    c_move = _choose_minimax_legal_move_c(
+    chosen_move = None
+    try:
+        chosen_move = _choose_minimax_legal_move_c(
+            board,
+            color,
+            plies,
+            piece_values,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+            captures_extend_plies=captures_extend_plies,
+            captures_extend_limit=captures_extend_limit,
+            search_cache_handle=search_cache_handle,
+        )
+    except RuntimeError:
+        chosen_move = None
+
+    if chosen_move is None:
+        chosen_move = _choose_minimax_legal_move_python(
+            board,
+            color,
+            plies,
+            piece_values,
+            rng=rng,
+            pawn_rank_values=pawn_rank_values,
+            backward_pawn_value=backward_pawn_value,
+            position_multipliers=position_multipliers,
+            control_weight=control_weight,
+            opposite_bishop_draw_factor=opposite_bishop_draw_factor,
+            captures_extend_plies=captures_extend_plies,
+            captures_extend_limit=captures_extend_limit,
+        )
+
+    return _prefer_non_draw_move_when_ahead(
         board,
         color,
+        chosen_move,
         plies,
         piece_values,
         pawn_rank_values=pawn_rank_values,
@@ -2496,9 +2685,7 @@ def choose_minimax_legal_move(
         opposite_bishop_draw_factor=opposite_bishop_draw_factor,
         captures_extend_plies=captures_extend_plies,
         captures_extend_limit=captures_extend_limit,
-        search_cache_handle=search_cache_handle,
     )
-    return c_move
 
 
 def choose_ai_move(board, color, ai_profile, rng=None):
