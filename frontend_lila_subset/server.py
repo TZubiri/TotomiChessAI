@@ -41,6 +41,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 content_type = "text/css; charset=utf-8"
             elif relative.endswith(".html"):
                 content_type = "text/html; charset=utf-8"
+            elif relative.endswith(".svg"):
+                content_type = "image/svg+xml"
             self._serve_static(relative, content_type)
             return
 
@@ -78,12 +80,15 @@ class AppHandler(BaseHTTPRequestHandler):
         _send_json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path == "/api/challenge/open":
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/api/challenge/open":
             self._create_open_challenge()
             return
 
-        if self.path.startswith("/api/board/game/") and "/move/" in self.path:
-            self._submit_board_move()
+        if path.startswith("/api/board/game/") and "/move/" in path:
+            self._submit_board_move(path)
             return
 
         _send_json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -92,7 +97,13 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             game = STORE.open_challenge()
         except RuntimeError as exc:
-            _send_json(self, {"error": str(exc)}, HTTPStatus.CONFLICT)
+            if str(exc) == "game limit reached":
+                _send_json(self, {"error": str(exc)}, HTTPStatus.CONFLICT)
+            else:
+                _send_json(self, {"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        except ValueError as exc:
+            _send_json(self, {"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
             return
 
         _send_json(
@@ -104,13 +115,14 @@ class AppHandler(BaseHTTPRequestHandler):
                     "url": f"/api/board/game/{game.game_id}",
                     "userColor": game.user_color,
                     "aiColor": game.ai_color,
-                }
+                },
+                "game": game.to_board_dict(),
             },
             HTTPStatus.CREATED,
         )
 
-    def _submit_board_move(self) -> None:
-        path = self.path.removeprefix("/api/board/game/")
+    def _submit_board_move(self, path: str) -> None:
+        path = path.removeprefix("/api/board/game/")
         game_id, _, move_path = path.partition("/move/")
         uci_move = move_path.strip("/")
 

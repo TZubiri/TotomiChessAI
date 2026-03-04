@@ -1,29 +1,37 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Lila Subset Guest Board</title>
+    <title>Lila Style Guest Chess</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <main>
-      <h1>Lila Subset Guest Board</h1>
-      <div class="toolbar">
-        <button id="play">Play</button>
-        <p id="status">Press Play to start.</p>
-      </div>
+    <div class="page">
+      <header class="topbar">
+        <span class="logo">lichess-style guest</span>
+      </header>
 
-      <section id="meta" class="meta"></section>
+      <main class="layout">
+        <section class="board-section" aria-label="Chessboard area">
+          <div id="board" class="board" role="grid" aria-label="Chessboard"></div>
+        </section>
 
-      <table id="board" class="board"></table>
+        <aside class="side-panel">
+          <button id="play" class="play-btn" type="button">Play</button>
+          <p id="status" class="status">Press Play to start.</p>
+          <section id="meta" class="meta"></section>
+          <ol id="moves" class="moves"></ol>
 
-      <div class="move-box">
-        <label>From <input id="from" maxlength="2" placeholder="e2" /></label>
-        <label>To <input id="to" maxlength="2" placeholder="e4" /></label>
-        <button id="move">Move</button>
-      </div>
-    </main>
+          <div class="manual-move">
+            <label>From <input id="from" maxlength="2" placeholder="e2" autocomplete="off" /></label>
+            <label>To <input id="to" maxlength="2" placeholder="e4" autocomplete="off" /></label>
+            <button id="move" type="button">Move</button>
+          </div>
+        </aside>
+      </main>
+    </div>
+
     <script type="module" src="/static/app.js"></script>
   </body>
 </html>

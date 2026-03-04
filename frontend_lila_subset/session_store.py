@@ -5,8 +5,13 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Protocol
 from uuid import uuid4
+
+try:
+    from .uci_client import UCIClient
+except ImportError:  # pragma: no cover - script execution path
+    from uci_client import UCIClient
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -15,15 +20,20 @@ if str(ROOT_DIR) not in sys.path:
 
 from chess import (  # noqa: E402
     Board,
-    RANDOM_AI_PROFILE,
-    apply_ai_move,
+    apply_coordinate_move,
     apply_user_move,
     get_game_status,
+    position_to_square,
 )
 
 
 COLORS = ("white", "black")
-DEFAULT_AI_PROFILE = dict(RANDOM_AI_PROFILE)
+DEFAULT_UCI_DEPTH = 1
+
+
+class UCIEngine(Protocol):
+    def bestmove(self, moves: list[str], depth: int = 1) -> Optional[str]:
+        ...
 
 
 def _board_to_matrix(board: Board) -> List[List[str]]:
@@ -37,6 +47,11 @@ def _board_to_matrix(board: Board) -> List[List[str]]:
     return rows
 
 
+def _move_to_uci(move: tuple[tuple[int, int], tuple[int, int]]) -> str:
+    from_pos, to_pos = move
+    return f"{position_to_square(from_pos)}{position_to_square(to_pos)}"
+
+
 def starting_board_matrix() -> List[List[str]]:
     return _board_to_matrix(Board())
 
@@ -47,7 +62,7 @@ class Game:
     board: Board
     user_color: str
     ai_color: str
-    ai_profile: dict
+    uci_depth: int
     moves: List[str] = field(default_factory=list)
     status: str = "in_progress"
     status_reason: Optional[str] = None
@@ -80,10 +95,11 @@ class Game:
 
 
 class GameStore:
-    def __init__(self, max_games: int = 4) -> None:
+    def __init__(self, max_games: int = 4, uci_engine: Optional[UCIEngine] = None) -> None:
         self.max_games = max_games
         self._games: Dict[str, Game] = {}
         self._lock = Lock()
+        self._uci_engine: UCIEngine = uci_engine if uci_engine is not None else UCIClient()
 
     def _refresh_status(self, game: Game) -> None:
         payload = get_game_status(game.board, game.turn)
@@ -91,20 +107,24 @@ class GameStore:
         game.status_reason = payload["reason"]
         game.winner = payload["winner"]
 
+    def _apply_uci_move(self, game: Game, move_text: str, color: str, mark_as_ai: bool) -> None:
+        _, _, normalized_move = apply_user_move(game.board, color, move_text, record=False)
+        game.moves.append(normalized_move)
+        if mark_as_ai:
+            game.last_ai_move = normalized_move
+
     def _apply_ai_turn_if_needed(self, game: Game) -> None:
         if game.status != "in_progress":
             return
         if game.turn != game.ai_color:
             return
 
-        _, _, _, ai_move_text = apply_ai_move(
-            game.board,
-            game.ai_color,
-            game.ai_profile,
-            record=False,
-        )
-        game.last_ai_move = ai_move_text
-        game.moves.append(ai_move_text)
+        best_move = self._uci_engine.bestmove(game.moves, depth=game.uci_depth)
+        if best_move is None:
+            self._refresh_status(game)
+            return
+
+        self._apply_uci_move(game, best_move, game.ai_color, mark_as_ai=True)
         self._refresh_status(game)
 
     def open_challenge(self, forced_user_color: Optional[str] = None) -> Game:
@@ -119,7 +139,7 @@ class GameStore:
                 board=Board(),
                 user_color=user_color,
                 ai_color=ai_color,
-                ai_profile=DEFAULT_AI_PROFILE,
+                uci_depth=DEFAULT_UCI_DEPTH,
             )
             self._refresh_status(game)
             self._apply_ai_turn_if_needed(game)
@@ -147,14 +167,22 @@ class GameStore:
             if game.turn != game.user_color:
                 raise ValueError("wait for your turn")
 
-            _, _, normalized_move = apply_user_move(
-                game.board,
-                game.user_color,
-                uci_move.strip().lower(),
-                record=False,
-            )
-            game.moves.append(normalized_move)
+            self._apply_uci_move(game, uci_move.strip().lower(), game.user_color, mark_as_ai=False)
             game.last_ai_move = None
             self._refresh_status(game)
             self._apply_ai_turn_if_needed(game)
             return game
+
+
+class DeterministicUCIEngine:
+    def bestmove(self, moves: list[str], depth: int = 1) -> Optional[str]:
+        board = Board()
+        active_color = "white"
+        for move_text in moves:
+            apply_coordinate_move(board, active_color, move_text, record=False)
+            active_color = "black" if active_color == "white" else "white"
+
+        legal_moves = board.get_legal_moves_for_color(active_color)
+        if not legal_moves:
+            return None
+        return _move_to_uci(legal_moves[0])
