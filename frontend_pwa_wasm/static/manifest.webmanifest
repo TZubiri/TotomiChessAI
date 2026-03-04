@@ -1,0 +1,10 @@
+{
+  "name": "Totomi Guest Chess",
+  "short_name": "GuestChess",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#dce7d7",
+  "theme_color": "#2f4b33",
+  "description": "Guest chess sessions with a light backend and PWA shell.",
+  "icons": []
+}

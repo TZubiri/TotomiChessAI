@@ -1,0 +1,34 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#2f4b33" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>PWA Chess Prototype</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>PWA Chess Prototype</h1>
+        <button id="install">Install</button>
+      </header>
+      <p id="status"></p>
+
+      <section class="controls">
+        <button id="create-session">Create Guest Session</button>
+        <button id="analyze">Run Local Analysis (stub)</button>
+      </section>
+
+      <section class="layout">
+        <ul id="session-list"></ul>
+        <div class="board-wrap">
+          <table id="board"></table>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
