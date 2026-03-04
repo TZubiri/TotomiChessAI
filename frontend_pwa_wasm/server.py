@@ -4,8 +4,9 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
-from session_store import SessionStore
+from session_store import SessionStore, starting_board_matrix
 
 
 STORE = SessionStore(max_sessions=4)
@@ -24,26 +25,33 @@ def _json(handler: BaseHTTPRequestHandler, payload: dict, status: HTTPStatus = H
 
 class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/":
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/":
             self._serve_static("index.html", "text/html; charset=utf-8")
             return
-        if self.path == "/static/app.js":
-            self._serve_static("app.js", "application/javascript; charset=utf-8")
-            return
-        if self.path == "/static/style.css":
-            self._serve_static("style.css", "text/css; charset=utf-8")
-            return
-        if self.path == "/static/service-worker.js":
-            self._serve_static("service-worker.js", "application/javascript; charset=utf-8")
-            return
-        if self.path == "/manifest.webmanifest":
+        if path == "/manifest.webmanifest":
             self._serve_static("manifest.webmanifest", "application/manifest+json; charset=utf-8")
             return
-        if self.path == "/api/sessions":
-            _json(self, {"sessions": [s.to_dict() for s in STORE.list_sessions()], "max_sessions": STORE.max_sessions})
+        if path.startswith("/static/"):
+            relative = path.removeprefix("/static/")
+            content_type = "text/plain; charset=utf-8"
+            if relative.endswith(".js"):
+                content_type = "application/javascript; charset=utf-8"
+            elif relative.endswith(".css"):
+                content_type = "text/css; charset=utf-8"
+            elif relative.endswith(".html"):
+                content_type = "text/html; charset=utf-8"
+            elif relative.endswith(".webmanifest"):
+                content_type = "application/manifest+json; charset=utf-8"
+            self._serve_static(relative, content_type)
             return
-        if self.path.startswith("/api/sessions/"):
-            session_id = self.path.removeprefix("/api/sessions/")
+        if path == "/api/initial-board":
+            _json(self, {"board": starting_board_matrix()})
+            return
+        if path.startswith("/api/state/"):
+            session_id = path.removeprefix("/api/state/").strip("/")
             try:
                 session = STORE.get(session_id)
             except KeyError:
@@ -54,35 +62,45 @@ class AppHandler(BaseHTTPRequestHandler):
         _json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path == "/api/sessions":
+        if self.path == "/api/play":
             try:
                 session = STORE.create_session()
-            except RuntimeError:
-                _json(self, {"error": "session limit reached"}, HTTPStatus.CONFLICT)
+            except RuntimeError as exc:
+                _json(self, {"error": str(exc)}, HTTPStatus.CONFLICT)
                 return
             _json(self, session.to_dict(), HTTPStatus.CREATED)
             return
 
-        if self.path.startswith("/api/sessions/") and self.path.endswith("/move"):
-            session_id = self.path.removeprefix("/api/sessions/").removesuffix("/move").strip("/")
-            self._submit_move(session_id)
+        if self.path == "/api/move":
+            self._submit_move()
             return
 
         _json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
 
-    def _submit_move(self, session_id: str) -> None:
+    def _submit_move(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
         payload = json.loads(body) if body else {}
-        source = payload.get("from", "")
-        target = payload.get("to", "")
+
+        session_id = str(payload.get("session_id", "")).strip()
+        source = str(payload.get("from", "")).strip().lower()
+        target = str(payload.get("to", "")).strip().lower()
+
+        if not session_id:
+            _json(self, {"error": "missing session_id"}, HTTPStatus.BAD_REQUEST)
+            return
+        if len(source) != 2 or len(target) != 2:
+            _json(self, {"error": "invalid move squares"}, HTTPStatus.BAD_REQUEST)
+            return
+
         try:
-            session = STORE.apply_move(session_id, source, target)
+            session = STORE.apply_user_move(session_id, f"{source}{target}")
         except KeyError:
             _json(self, {"error": "session not found"}, HTTPStatus.NOT_FOUND)
             return
         except ValueError as exc:
             _json(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+
         _json(self, session.to_dict())
 
     def _serve_static(self, filename: str, content_type: str) -> None:

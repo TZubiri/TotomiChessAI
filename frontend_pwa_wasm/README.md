@@ -4,10 +4,11 @@ This branch targets a modern installable web app while keeping backend logic thi
 
 ## Included in scaffold
 
+- Main page board + Play button only.
 - Guest sessions capped at 4 games.
-- JSON API for session lifecycle and moves.
+- Random color assignment with auto AI first move for black users.
+- JSON API for single-session lifecycle and moves.
 - PWA manifest + service worker for offline shell cache.
-- Optional local analysis hook for a future Stockfish WASM worker.
 
 ## Run
 

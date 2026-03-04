@@ -3,30 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#2f4b33" />
+    <meta name="theme-color" content="#25462b" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <title>PWA Chess Prototype</title>
+    <title>PWA Guest Chess</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <main>
-      <header>
-        <h1>PWA Chess Prototype</h1>
-        <button id="install">Install</button>
-      </header>
-      <p id="status"></p>
+      <h1>PWA Guest Chess</h1>
+      <div class="toolbar">
+        <button id="play">Play</button>
+        <p id="status">Press Play to start.</p>
+      </div>
 
-      <section class="controls">
-        <button id="create-session">Create Guest Session</button>
-        <button id="analyze">Run Local Analysis (stub)</button>
-      </section>
+      <section id="meta" class="meta"></section>
 
-      <section class="layout">
-        <ul id="session-list"></ul>
-        <div class="board-wrap">
-          <table id="board"></table>
-        </div>
-      </section>
+      <table id="board" class="board"></table>
+
+      <div class="move-box">
+        <label>From <input id="from" maxlength="2" placeholder="e2" /></label>
+        <label>To <input id="to" maxlength="2" placeholder="e4" /></label>
+        <button id="move">Move</button>
+      </div>
     </main>
 
     <script type="module" src="/static/app.js"></script>
