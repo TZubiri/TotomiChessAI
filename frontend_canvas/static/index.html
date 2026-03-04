@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Canvas Chess Prototype</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Canvas Chess Prototype</h1>
+      <p>Guest sessions only, max 4 concurrent rooms.</p>
+      <button id="create-session">Create Session</button>
+      <div id="status"></div>
+      <div class="layout">
+        <ul id="session-list"></ul>
+        <canvas id="board" width="512" height="512"></canvas>
+      </div>
+    </main>
+    <script src="/static/app.js" type="module"></script>
+  </body>
+</html>
