@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lila Subset Prototype</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Lila-compatible Subset</h1>
+      <p>This is a thin, self-hosted subset with endpoint names similar to Lichess.</p>
+      <button id="open-challenge">Open Guest Challenge</button>
+      <p id="status"></p>
+
+      <section>
+        <h2>Games</h2>
+        <ul id="game-list"></ul>
+      </section>
+
+      <section>
+        <h2>Submit Move</h2>
+        <form id="move-form">
+          <label>Game ID <input id="game-id" required /></label>
+          <label>UCI move <input id="uci" placeholder="e2e4" required /></label>
+          <button type="submit">Send</button>
+        </form>
+      </section>
+    </main>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
