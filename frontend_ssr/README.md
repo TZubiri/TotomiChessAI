@@ -4,10 +4,12 @@ This prototype is the old-school option: server-rendered pages with minimal Java
 
 ## What is included
 
+- Main page board + Play button only.
 - Guest sessions without login.
 - Hard limit of 4 concurrent sessions.
-- Server-side board state per session.
-- Basic move form (`from` and `to`), no full legality engine yet.
+- Random user color assignment.
+- Immediate AI first move when user is black.
+- Legal move validation and AI replies powered by the local chess engine.
 
 ## Run
 
