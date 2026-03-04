@@ -3,29 +3,26 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Lila Subset Prototype</title>
+    <title>Lila Subset Guest Board</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <main>
-      <h1>Lila-compatible Subset</h1>
-      <p>This is a thin, self-hosted subset with endpoint names similar to Lichess.</p>
-      <button id="open-challenge">Open Guest Challenge</button>
-      <p id="status"></p>
+      <h1>Lila Subset Guest Board</h1>
+      <div class="toolbar">
+        <button id="play">Play</button>
+        <p id="status">Press Play to start.</p>
+      </div>
 
-      <section>
-        <h2>Games</h2>
-        <ul id="game-list"></ul>
-      </section>
+      <section id="meta" class="meta"></section>
 
-      <section>
-        <h2>Submit Move</h2>
-        <form id="move-form">
-          <label>Game ID <input id="game-id" required /></label>
-          <label>UCI move <input id="uci" placeholder="e2e4" required /></label>
-          <button type="submit">Send</button>
-        </form>
-      </section>
+      <table id="board" class="board"></table>
+
+      <div class="move-box">
+        <label>From <input id="from" maxlength="2" placeholder="e2" /></label>
+        <label>To <input id="to" maxlength="2" placeholder="e4" /></label>
+        <button id="move">Move</button>
+      </div>
     </main>
     <script type="module" src="/static/app.js"></script>
   </body>

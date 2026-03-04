@@ -4,8 +4,9 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
-from session_store import GameStore
+from session_store import GameStore, starting_board_matrix
 
 
 STORE = GameStore(max_games=4)
@@ -24,27 +25,48 @@ def _send_json(handler: BaseHTTPRequestHandler, payload: dict, status: HTTPStatu
 
 class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/":
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/":
             self._serve_static("index.html", "text/html; charset=utf-8")
             return
-        if self.path == "/static/app.js":
-            self._serve_static("app.js", "application/javascript; charset=utf-8")
+
+        if path.startswith("/static/"):
+            relative = path.removeprefix("/static/")
+            content_type = "text/plain; charset=utf-8"
+            if relative.endswith(".js"):
+                content_type = "application/javascript; charset=utf-8"
+            elif relative.endswith(".css"):
+                content_type = "text/css; charset=utf-8"
+            elif relative.endswith(".html"):
+                content_type = "text/html; charset=utf-8"
+            self._serve_static(relative, content_type)
             return
-        if self.path == "/static/style.css":
-            self._serve_static("style.css", "text/css; charset=utf-8")
-            return
-        if self.path == "/api/stream/event":
+
+        if path == "/api/stream/event":
             events = [
                 {
                     "type": "gameStart",
-                    "game": {"id": game.game_id, "turn": game.turn, "moves": game.moves},
+                    "game": {
+                        "id": game.game_id,
+                        "turn": game.turn,
+                        "moves": list(game.moves),
+                        "userColor": game.user_color,
+                        "aiColor": game.ai_color,
+                    },
                 }
                 for game in STORE.list_games()
             ]
             _send_json(self, {"events": events})
             return
-        if self.path.startswith("/api/board/game/"):
-            game_id = self.path.removeprefix("/api/board/game/").strip("/")
+
+        if path == "/api/board/initial":
+            _send_json(self, {"board": starting_board_matrix()})
+            return
+
+        if path.startswith("/api/board/game/"):
+            game_id = path.removeprefix("/api/board/game/").strip("/")
             try:
                 game = STORE.get_game(game_id)
             except KeyError:
@@ -52,45 +74,55 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             _send_json(self, game.to_board_dict())
             return
+
         _send_json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
         if self.path == "/api/challenge/open":
             self._create_open_challenge()
             return
+
         if self.path.startswith("/api/board/game/") and "/move/" in self.path:
             self._submit_board_move()
             return
+
         _send_json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def _create_open_challenge(self) -> None:
         try:
             game = STORE.open_challenge()
-        except RuntimeError:
-            _send_json(self, {"error": "game limit reached"}, HTTPStatus.CONFLICT)
+        except RuntimeError as exc:
+            _send_json(self, {"error": str(exc)}, HTTPStatus.CONFLICT)
             return
 
-        payload = {
-            "challenge": {
-                "id": game.game_id,
-                "status": "created",
-                "url": f"/api/board/game/{game.game_id}",
-            }
-        }
-        _send_json(self, payload, HTTPStatus.CREATED)
+        _send_json(
+            self,
+            {
+                "challenge": {
+                    "id": game.game_id,
+                    "status": "created",
+                    "url": f"/api/board/game/{game.game_id}",
+                    "userColor": game.user_color,
+                    "aiColor": game.ai_color,
+                }
+            },
+            HTTPStatus.CREATED,
+        )
 
     def _submit_board_move(self) -> None:
         path = self.path.removeprefix("/api/board/game/")
         game_id, _, move_path = path.partition("/move/")
         uci_move = move_path.strip("/")
+
         try:
-            game = STORE.submit_move(game_id, uci_move)
+            game = STORE.submit_user_move(game_id, uci_move)
         except KeyError:
             _send_json(self, {"error": "game not found"}, HTTPStatus.NOT_FOUND)
             return
         except ValueError as exc:
             _send_json(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+
         _send_json(self, {"ok": True, "game": game.to_board_dict()})
 
     def _serve_static(self, filename: str, content_type: str) -> None:
