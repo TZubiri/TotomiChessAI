@@ -1,0 +1,71 @@
+body {
+  margin: 0;
+  font-family: "Gill Sans", "Segoe UI", sans-serif;
+  background: linear-gradient(145deg, #e0e7da 0%, #b4c2a4 45%, #8fa287 100%);
+  color: #1e2a1b;
+}
+
+main {
+  max-width: 980px;
+  margin: 1.25rem auto;
+  padding: 1rem;
+  background: #f7f8f3;
+  border: 1px solid #8fa287;
+}
+
+h1,
+h2 {
+  margin: 0 0 0.7rem;
+}
+
+button {
+  border: 1px solid #344c33;
+  background: #eaf0e3;
+  padding: 0.45rem 0.85rem;
+  cursor: pointer;
+}
+
+#status {
+  min-height: 1.3rem;
+  color: #6a2518;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 1rem;
+}
+
+#session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #9daf9b;
+  background: #fff;
+}
+
+#session-list li {
+  border-bottom: 1px solid #d4ddd1;
+}
+
+#session-list li:last-child {
+  border-bottom: 0;
+}
+
+#session-list button {
+  width: 100%;
+  border: 0;
+  text-align: left;
+  background: transparent;
+  padding: 0.5rem;
+}
+
+#board {
+  width: min(92vw, 560px);
+}
+
+@media (max-width: 840px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
