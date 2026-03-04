@@ -1,8 +1,11 @@
-const board = document.getElementById("board");
-const ctx = board.getContext("2d");
-const sessionList = document.getElementById("session-list");
+const boardCanvas = document.getElementById("board");
+const ctx = boardCanvas.getContext("2d");
+const playBtn = document.getElementById("play");
+const moveBtn = document.getElementById("move");
+const fromInput = document.getElementById("from");
+const toInput = document.getElementById("to");
 const statusEl = document.getElementById("status");
-const createBtn = document.getElementById("create-session");
+const metaEl = document.getElementById("meta");
 
 const PIECES = {
   P: "♙",
@@ -19,61 +22,96 @@ const PIECES = {
   k: "♚",
 };
 
-let activeSession = null;
+const STARTING_BOARD = [
+  ["r", "n", "b", "q", "k", "b", "n", "r"],
+  ["p", "p", "p", "p", "p", "p", "p", "p"],
+  [".", ".", ".", ".", ".", ".", ".", "."],
+  [".", ".", ".", ".", ".", ".", ".", "."],
+  [".", ".", ".", ".", ".", ".", ".", "."],
+  [".", ".", ".", ".", ".", ".", ".", "."],
+  ["P", "P", "P", "P", "P", "P", "P", "P"],
+  ["R", "N", "B", "Q", "K", "B", "N", "R"],
+];
+
+let session = null;
 let selectedSquare = null;
 
-function squareName(row, col) {
-  return "abcdefgh"[col] + String(8 - row);
-}
-
-function squareFromEvent(event) {
-  const rect = board.getBoundingClientRect();
-  const scaleX = board.width / rect.width;
-  const scaleY = board.height / rect.height;
-  const x = (event.clientX - rect.left) * scaleX;
-  const y = (event.clientY - rect.top) * scaleY;
-  const size = board.width / 8;
-  const col = Math.floor(x / size);
-  const row = Math.floor(y / size);
-  if (row < 0 || row > 7 || col < 0 || col > 7) {
-    return null;
-  }
-  return squareName(row, col);
+function setSessionInUrl(sessionId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("session", sessionId);
+  history.replaceState({}, "", url.toString());
 }
 
 function setStatus(message) {
   statusEl.textContent = message;
 }
 
-function drawBoard() {
-  const size = board.width / 8;
-  ctx.clearRect(0, 0, board.width, board.height);
+function squareName(row, col) {
+  return "abcdefgh"[col] + String(8 - row);
+}
+
+function squareFromCanvasEvent(event) {
+  const rect = boardCanvas.getBoundingClientRect();
+  const x = ((event.clientX - rect.left) * boardCanvas.width) / rect.width;
+  const y = ((event.clientY - rect.top) * boardCanvas.height) / rect.height;
+  const squareSize = boardCanvas.width / 8;
+  const col = Math.floor(x / squareSize);
+  const row = Math.floor(y / squareSize);
+  if (col < 0 || col > 7 || row < 0 || row > 7) {
+    return null;
+  }
+  return squareName(row, col);
+}
+
+function userCanMove() {
+  return Boolean(session && session.status === "in_progress" && session.user_to_move);
+}
+
+function renderMeta() {
+  if (!session) {
+    metaEl.innerHTML = "<p>Press Play to start. You will be assigned white or black.</p>";
+    return;
+  }
+  const winnerText = session.winner ? `${session.winner} wins` : "draw";
+  const finished = session.status === "in_progress" ? "" : `<p class=\"finish\">Game over: ${winnerText} (${session.status_reason}).</p>`;
+  const aiMove = session.last_ai_move ? `<p>AI move: <strong>${session.last_ai_move}</strong></p>` : "";
+  const moveTail = session.moves.slice(-12).join(" ") || "-";
+  metaEl.innerHTML = `
+    <p><strong>You are ${session.user_color}</strong>. AI is ${session.ai_color}.</p>
+    <p>Turn: <strong>${session.turn}</strong></p>
+    ${aiMove}
+    <p>Moves: ${moveTail}</p>
+    ${finished}
+  `;
+}
+
+function drawBoard(board) {
+  const size = boardCanvas.width / 8;
   for (let row = 0; row < 8; row += 1) {
     for (let col = 0; col < 8; col += 1) {
-      const isLight = (row + col) % 2 === 0;
-      ctx.fillStyle = isLight ? "#f2e0be" : "#b0804a";
+      ctx.fillStyle = (row + col) % 2 === 0 ? "#f6e4bf" : "#a87443";
       ctx.fillRect(col * size, row * size, size, size);
 
-      const sq = squareName(row, col);
-      if (sq === selectedSquare) {
-        ctx.strokeStyle = "#a1251a";
-        ctx.lineWidth = 3;
+      const square = squareName(row, col);
+      if (square === selectedSquare) {
+        ctx.strokeStyle = "#bb3f1c";
+        ctx.lineWidth = 4;
         ctx.strokeRect(col * size + 2, row * size + 2, size - 4, size - 4);
       }
 
-      const piece = activeSession?.board?.[row]?.[col];
-      if (piece && piece !== ".") {
-        ctx.fillStyle = piece === piece.toUpperCase() ? "#f8f8f8" : "#131313";
-        ctx.font = "42px Georgia";
+      const piece = board[row][col];
+      if (piece !== ".") {
+        ctx.font = "52px Cambria";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
+        ctx.fillStyle = piece === piece.toUpperCase() ? "#f6f6f6" : "#141414";
         ctx.fillText(PIECES[piece] || piece, col * size + size / 2, row * size + size / 2 + 1);
       }
     }
   }
 }
 
-async function fetchJSON(url, options) {
+async function requestJSON(url, options) {
   const response = await fetch(url, options);
   const payload = await response.json();
   if (!response.ok) {
@@ -82,80 +120,109 @@ async function fetchJSON(url, options) {
   return payload;
 }
 
-async function refreshSessions() {
-  const payload = await fetchJSON("/api/sessions");
-  sessionList.innerHTML = "";
-  payload.sessions.forEach((session) => {
-    const li = document.createElement("li");
-    const btn = document.createElement("button");
-    btn.textContent = `${session.session_id} (${session.turn})`;
-    btn.addEventListener("click", () => loadSession(session.session_id));
-    li.appendChild(btn);
-    sessionList.appendChild(li);
-  });
+async function loadInitialBoard() {
+  drawBoard(STARTING_BOARD);
+  renderMeta();
 }
 
-async function loadSession(sessionId) {
-  activeSession = await fetchJSON(`/api/sessions/${sessionId}`);
-  selectedSquare = null;
-  drawBoard();
-  setStatus(`Loaded session ${sessionId}. Turn: ${activeSession.turn}.`);
-  await refreshSessions();
-}
-
-async function createSession() {
+async function play() {
   try {
-    const created = await fetchJSON("/api/sessions", { method: "POST" });
-    await loadSession(created.session_id);
+    session = await requestJSON("/api/play", { method: "POST" });
+    setSessionInUrl(session.session_id);
+    selectedSquare = null;
+    drawBoard(session.board);
+    renderMeta();
+    setStatus(`Assigned ${session.user_color}. ${session.user_to_move ? "Your move." : "AI moved first."}`);
   } catch (error) {
     setStatus(error.message);
   }
 }
 
-async function submitMove(fromSquare, toSquare) {
-  if (!activeSession) {
+async function sendMove(fromSquare, toSquare) {
+  if (!session) {
+    setStatus("Press Play first.");
     return;
   }
   try {
-    activeSession = await fetchJSON(`/api/sessions/${activeSession.session_id}/move`, {
+    session = await requestJSON("/api/move", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ from: fromSquare, to: toSquare }),
+      body: JSON.stringify({ session_id: session.session_id, from: fromSquare, to: toSquare }),
     });
     selectedSquare = null;
-    drawBoard();
-    setStatus(`Move ${fromSquare}-${toSquare} accepted. Turn: ${activeSession.turn}.`);
-    await refreshSessions();
+    drawBoard(session.board);
+    renderMeta();
+    setStatus(session.status === "in_progress" ? "Move accepted." : "Game complete.");
   } catch (error) {
     setStatus(error.message);
-    selectedSquare = null;
-    drawBoard();
   }
 }
 
-board.addEventListener("click", async (event) => {
-  if (!activeSession) {
-    setStatus("Create or load a session first.");
+boardCanvas.addEventListener("click", async (event) => {
+  if (!userCanMove()) {
+    setStatus(session ? "Wait for your turn." : "Press Play first.");
     return;
   }
-  const square = squareFromEvent(event);
+
+  const square = squareFromCanvasEvent(event);
   if (!square) {
     return;
   }
+
   if (!selectedSquare) {
     selectedSquare = square;
-    drawBoard();
-    setStatus(`Selected ${square}. Choose destination.`);
+    fromInput.value = square;
+    toInput.value = "";
+    drawBoard(session.board);
+    setStatus(`From ${square}. Select destination.`);
     return;
   }
+
   const fromSquare = selectedSquare;
+  const toSquare = square;
   selectedSquare = null;
-  await submitMove(fromSquare, square);
+  fromInput.value = fromSquare;
+  toInput.value = toSquare;
+  await sendMove(fromSquare, toSquare);
 });
 
-createBtn.addEventListener("click", createSession);
+moveBtn.addEventListener("click", async () => {
+  if (!userCanMove()) {
+    setStatus(session ? "Wait for your turn." : "Press Play first.");
+    return;
+  }
+  const fromSquare = fromInput.value.trim().toLowerCase();
+  const toSquare = toInput.value.trim().toLowerCase();
+  if (fromSquare.length !== 2 || toSquare.length !== 2) {
+    setStatus("Enter both squares.");
+    return;
+  }
+  await sendMove(fromSquare, toSquare);
+});
 
-(async () => {
-  drawBoard();
-  await refreshSessions();
-})();
+playBtn.addEventListener("click", play);
+
+drawBoard(STARTING_BOARD);
+renderMeta();
+setStatus("Press Play to start.");
+
+async function boot() {
+  const params = new URLSearchParams(window.location.search);
+  const sessionId = params.get("session");
+  if (!sessionId) {
+    await loadInitialBoard();
+    return;
+  }
+
+  try {
+    session = await requestJSON(`/api/state/${sessionId}`);
+    drawBoard(session.board);
+    renderMeta();
+    setStatus("Session restored from URL.");
+  } catch {
+    await loadInitialBoard();
+    setStatus("Could not restore session; press Play.");
+  }
+}
+
+boot();

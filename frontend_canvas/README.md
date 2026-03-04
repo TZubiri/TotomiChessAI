@@ -4,10 +4,11 @@ This prototype renders the board on a single `<canvas>` and talks to a thin JSON
 
 ## What is included
 
-- Guest session creation without login.
+- Main page board + Play button only.
+- Guest sessions with random color assignment.
 - Session cap set to 4 concurrent games.
-- Click-to-move interaction in canvas.
-- Backend remains authoritative for turn ownership.
+- If user is black, AI plays first automatically.
+- After each user move, backend applies an AI reply.
 
 ## Run
 

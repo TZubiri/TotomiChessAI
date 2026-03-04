@@ -3,20 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Canvas Chess Prototype</title>
+    <title>Canvas Guest Chess</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <main>
-      <h1>Canvas Chess Prototype</h1>
-      <p>Guest sessions only, max 4 concurrent rooms.</p>
-      <button id="create-session">Create Session</button>
-      <div id="status"></div>
-      <div class="layout">
-        <ul id="session-list"></ul>
-        <canvas id="board" width="512" height="512"></canvas>
+      <h1>Canvas Guest Chess</h1>
+      <div class="toolbar">
+        <button id="play">Play</button>
+        <p id="status"></p>
+      </div>
+
+      <section class="meta" id="meta"></section>
+
+      <canvas id="board" width="640" height="640"></canvas>
+
+      <div class="move-box">
+        <label>From <input id="from" maxlength="2" placeholder="e2" /></label>
+        <label>To <input id="to" maxlength="2" placeholder="e4" /></label>
+        <button id="move">Move</button>
       </div>
     </main>
-    <script src="/static/app.js" type="module"></script>
+
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>

@@ -4,8 +4,9 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
-from session_store import SessionStore
+from session_store import SessionStore, starting_board_matrix
 
 
 STORE = SessionStore(max_sessions=4)
@@ -24,21 +25,23 @@ def _json(handler: BaseHTTPRequestHandler, payload: dict, status: HTTPStatus = H
 
 class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/":
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/":
             self._serve_static("index.html", "text/html; charset=utf-8")
             return
-        if self.path == "/static/app.js":
+        if path == "/static/app.js":
             self._serve_static("app.js", "application/javascript; charset=utf-8")
             return
-        if self.path == "/static/style.css":
+        if path == "/static/style.css":
             self._serve_static("style.css", "text/css; charset=utf-8")
             return
-        if self.path == "/api/sessions":
-            sessions = [s.to_dict() for s in STORE.list_sessions()]
-            _json(self, {"sessions": sessions, "max_sessions": STORE.max_sessions})
+        if path == "/api/initial-board":
+            _json(self, {"board": starting_board_matrix()})
             return
-        if self.path.startswith("/api/sessions/"):
-            session_id = self.path.removeprefix("/api/sessions/")
+        if path.startswith("/api/state/"):
+            session_id = path.removeprefix("/api/state/").strip("/")
             try:
                 session = STORE.get(session_id)
             except KeyError:
@@ -46,32 +49,42 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             _json(self, session.to_dict())
             return
-
         _json(self, {"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path == "/api/sessions":
-            try:
-                session = STORE.create_session()
-            except RuntimeError:
-                _json(self, {"error": "session limit reached"}, status=HTTPStatus.CONFLICT)
-                return
-            _json(self, session.to_dict(), status=HTTPStatus.CREATED)
+        if self.path == "/api/play":
+            self._play()
             return
-        if self.path.startswith("/api/sessions/") and self.path.endswith("/move"):
-            session_id = self.path.removeprefix("/api/sessions/").removesuffix("/move").strip("/")
-            self._submit_move(session_id)
+        if self.path == "/api/move":
+            self._move()
             return
         _json(self, {"error": "not found"}, status=HTTPStatus.NOT_FOUND)
 
-    def _submit_move(self, session_id: str) -> None:
+    def _play(self) -> None:
+        try:
+            session = STORE.create_session()
+        except RuntimeError as exc:
+            _json(self, {"error": str(exc)}, status=HTTPStatus.CONFLICT)
+            return
+        _json(self, session.to_dict(), status=HTTPStatus.CREATED)
+
+    def _move(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(content_length).decode("utf-8")
-        data = json.loads(raw) if raw else {}
-        source = data.get("from", "")
-        target = data.get("to", "")
+        payload = json.loads(raw) if raw else {}
+        session_id = str(payload.get("session_id", "")).strip()
+        source = str(payload.get("from", "")).strip().lower()
+        target = str(payload.get("to", "")).strip().lower()
+
+        if not session_id:
+            _json(self, {"error": "missing session_id"}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if len(source) != 2 or len(target) != 2:
+            _json(self, {"error": "invalid move squares"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
         try:
-            session = STORE.apply_move(session_id, source, target)
+            session = STORE.apply_user_move(session_id, f"{source}{target}")
         except KeyError:
             _json(self, {"error": "session not found"}, status=HTTPStatus.NOT_FOUND)
             return
