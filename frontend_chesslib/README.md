@@ -1,11 +1,15 @@
 # Architecture 3 - Chess UI Library Shell
 
-This branch uses off-the-shelf board/rules libraries for speed:
+This branch uses a lightweight library-assisted frontend:
 
-- `chess.js` for legal move validation in-browser.
-- `chessboard.js` for board drag/drop UI.
+- Local `chess.js` copy for in-browser move validation/replay.
 
-The backend only manages guest sessions and move history.
+The page is intentionally minimal: board + Play button, then alternating user/AI moves.
+
+- Guest sessions with random color assignment.
+- 4-session cap.
+- If user is black, AI auto-plays first.
+- Backend remains authoritative for legality and AI turns.
 
 ## Run
 

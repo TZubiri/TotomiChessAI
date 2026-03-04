@@ -3,30 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Chess Library Frontend</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/chessboardjs@1.0.0/www/css/chessboard-1.0.0.min.css" />
+    <title>Chess Library Guest UI</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
     <main>
-      <h1>Chess Library Frontend</h1>
-      <p>Fast prototype using chessboard.js + chess.js.</p>
-      <button id="create-session">Create Session</button>
-      <p id="status"></p>
-      <div class="layout">
-        <aside>
-          <h2>Sessions</h2>
-          <ul id="session-list"></ul>
-        </aside>
-        <section>
-          <div id="board"></div>
-        </section>
+      <h1>Chess Library Guest UI</h1>
+      <div class="toolbar">
+        <button id="play">Play</button>
+        <p id="status">Press Play to start.</p>
+      </div>
+
+      <section id="meta" class="meta"></section>
+
+      <table id="board" class="board"></table>
+
+      <div class="move-box">
+        <label>From <input id="from" maxlength="2" placeholder="e2" /></label>
+        <label>To <input id="to" maxlength="2" placeholder="e4" /></label>
+        <button id="move">Move</button>
       </div>
     </main>
 
-    <script src="https://cdn.jsdelivr.net/npm/chess.js@1.0.0-beta.7/dist/chess.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jquery@3.7.1/dist/jquery.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chessboardjs@1.0.0/www/js/chessboard-1.0.0.min.js"></script>
     <script type="module" src="/static/app.js"></script>
   </body>
 </html>

@@ -4,6 +4,7 @@ import json
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse
 
 from session_store import SessionStore
 
@@ -24,57 +25,84 @@ def _write_json(handler: BaseHTTPRequestHandler, payload: dict, status: HTTPStat
 
 class AppHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/":
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path == "/":
             self._serve_static("index.html", "text/html; charset=utf-8")
             return
-        if self.path == "/static/app.js":
-            self._serve_static("app.js", "application/javascript; charset=utf-8")
+        if path.startswith("/static/"):
+            relative = path.removeprefix("/static/")
+            content_type = "text/plain; charset=utf-8"
+            if relative.endswith(".js"):
+                content_type = "application/javascript; charset=utf-8"
+            elif relative.endswith(".css"):
+                content_type = "text/css; charset=utf-8"
+            elif relative.endswith(".html"):
+                content_type = "text/html; charset=utf-8"
+            self._serve_static(relative, content_type)
             return
-        if self.path == "/static/style.css":
-            self._serve_static("style.css", "text/css; charset=utf-8")
-            return
-        if self.path == "/api/sessions":
-            sessions = [session.to_dict() for session in STORE.list_sessions()]
-            _write_json(self, {"sessions": sessions, "max_sessions": STORE.max_sessions})
-            return
-        if self.path.startswith("/api/sessions/"):
-            session_id = self.path.removeprefix("/api/sessions/")
-            try:
-                session = STORE.get(session_id)
-            except KeyError:
-                _write_json(self, {"error": "session not found"}, HTTPStatus.NOT_FOUND)
+        if path == "/api/play-state":
+            session_id = parse_session_from_query(parsed.query)
+            if not session_id:
+                _write_json(self, {"error": "missing session"}, HTTPStatus.BAD_REQUEST)
                 return
-            _write_json(self, session.to_dict())
+            self._state_for(session_id)
+            return
+        if path.startswith("/api/state/"):
+            session_id = path.removeprefix("/api/state/").strip("/")
+            self._state_for(session_id)
             return
         _write_json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path == "/api/sessions":
+        if self.path == "/api/play":
             try:
                 session = STORE.create_session()
-            except RuntimeError:
-                _write_json(self, {"error": "session limit reached"}, HTTPStatus.CONFLICT)
+            except RuntimeError as exc:
+                _write_json(self, {"error": str(exc)}, HTTPStatus.CONFLICT)
                 return
             _write_json(self, session.to_dict(), HTTPStatus.CREATED)
             return
-        if self.path.startswith("/api/sessions/") and self.path.endswith("/moves"):
-            session_id = self.path.removeprefix("/api/sessions/").removesuffix("/moves").strip("/")
-            self._append_move(session_id)
+
+        if self.path == "/api/move":
+            self._move()
             return
+
         _write_json(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
 
-    def _append_move(self, session_id: str) -> None:
-        raw = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
-        data = json.loads(raw) if raw else {}
-        uci = data.get("uci", "")
+    def _state_for(self, session_id: str) -> None:
         try:
-            session = STORE.append_move(session_id, uci)
+            session = STORE.get(session_id)
+        except KeyError:
+            _write_json(self, {"error": "session not found"}, HTTPStatus.NOT_FOUND)
+            return
+        _write_json(self, session.to_dict())
+
+    def _move(self) -> None:
+        raw = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
+        payload = json.loads(raw) if raw else {}
+
+        session_id = str(payload.get("session_id", "")).strip()
+        source = str(payload.get("from", "")).strip().lower()
+        target = str(payload.get("to", "")).strip().lower()
+
+        if not session_id:
+            _write_json(self, {"error": "missing session_id"}, HTTPStatus.BAD_REQUEST)
+            return
+        if len(source) != 2 or len(target) != 2:
+            _write_json(self, {"error": "invalid move squares"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            session = STORE.apply_user_move(session_id, f"{source}{target}")
         except KeyError:
             _write_json(self, {"error": "session not found"}, HTTPStatus.NOT_FOUND)
             return
         except ValueError as exc:
             _write_json(self, {"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             return
+
         _write_json(self, session.to_dict())
 
     def _serve_static(self, filename: str, content_type: str) -> None:
@@ -85,6 +113,13 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+
+def parse_session_from_query(query: str) -> str:
+    for chunk in query.split("&"):
+        if chunk.startswith("session="):
+            return chunk.split("=", 1)[1]
+    return ""
 
 
 def main() -> None:
