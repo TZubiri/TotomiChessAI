@@ -1,0 +1,11 @@
+COMMS - Branch 1 (SSR HTML)
+===========================
+
+Use this file for non-blocking questions and answers.
+
+Entry template:
+- Timestamp:
+- Question:
+- Default in use:
+- Impact if changed:
+- User answer:
